@@ -679,26 +679,13 @@ const ColumnDescriptor* SchemaDescriptor::Column(int i) const {
   return &leaves_[i];
 }
 
-int SchemaDescriptor::ColumnIndex(const std::string& node_path) const {
-  auto search = leaf_to_idx_.find(node_path);
-  if (search == leaf_to_idx_.end()) {
-    // Not found
-    return -1;
+int SchemaDescriptor::ColumnIndex(const NodePtr& node) const {
+  for (uint i = 0; i < leaves_.size(); i++) {
+    if (leaves_[i].schema_node()->Equals(node.get())) {
+      return i;
+    }
   }
-  return search->second;
-}
-
-int SchemaDescriptor::ColumnIndex(const Node& node) const {
-  int result = ColumnIndex(node.path()->ToDotString());
-  if (result < 0) {
-    return -1;
-  }
-  DCHECK(result < num_columns());
-  if (!node.Equals(Column(result)->schema_node().get())) {
-    // Same path but not the same node
-    return -1;
-  }
-  return result;
+  return -1;
 }
 
 const schema::NodePtr& SchemaDescriptor::GetColumnRoot(int i) const {

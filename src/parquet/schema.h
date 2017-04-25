@@ -379,10 +379,8 @@ class PARQUET_EXPORT SchemaDescriptor {
 
   const ColumnDescriptor* Column(int i) const;
 
-  // Get the index of a column by its dotstring path, or negative value if not found
-  int ColumnIndex(const std::string& node_path) const;
-  // Get the index of a column by its node, or negative value if not found
-  int ColumnIndex(const schema::Node& node) const;
+  // Get the index of a node, or negative value if not found
+  int ColumnIndex(const schema::NodePtr& node) const;
 
   bool Equals(const SchemaDescriptor& other) const;
 

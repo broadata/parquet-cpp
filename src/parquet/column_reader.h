@@ -25,6 +25,7 @@
 #include <memory>
 #include <unordered_map>
 #include <vector>
+#include <iostream>
 
 #include <arrow/util/bit-util.h>
 
@@ -300,10 +301,9 @@ inline int64_t TypedColumnReader<DType>::ReadBatch(int64_t batch_size,
 }
 
 inline void DefinitionLevelsToBitmap(const int16_t* def_levels, int64_t num_def_levels,
-                                     int16_t max_definition_level,
-                                     int16_t max_repetition_level, int64_t* values_read,
-                                     int64_t* null_count, uint8_t* valid_bits,
-                                     int64_t valid_bits_offset) {
+    int16_t max_definition_level,  int16_t max_repetition_level,
+    int64_t* values_read, int64_t* null_count,
+    uint8_t* valid_bits, int64_t valid_bits_offset) {
   int byte_offset = static_cast<int>(valid_bits_offset) / 8;
   int bit_offset = static_cast<int>(valid_bits_offset) % 8;
   uint8_t bitset = valid_bits[byte_offset];
@@ -414,8 +414,7 @@ inline int64_t TypedColumnReader<DType>::ReadBatchSpaced(
       int16_t max_definition_level = descr_->max_definition_level();
       int16_t max_repetition_level = descr_->max_repetition_level();
       DefinitionLevelsToBitmap(def_levels, num_def_levels, max_definition_level,
-                               max_repetition_level, values_read, &null_count, valid_bits,
-                               valid_bits_offset);
+          max_repetition_level, values_read, &null_count, valid_bits, valid_bits_offset);
       total_values = ReadValuesSpaced(*values_read, values, static_cast<int>(null_count),
                                       valid_bits, valid_bits_offset);
     }

@@ -1386,8 +1386,10 @@ class TestNestedSchemaRead : public ::testing::TestWithParam<Repetition::type> {
 
     // Create definition levels for the different columns that contain interleaved
     // nulls and values at all nesting levels
-    int16_t default_def_levels[num_test_rows] = {0, }; // no nulls
-    int16_t default_rep_levels[num_test_rows] = {0, }; // no repetition
+    int16_t default_def_levels[num_test_rows];
+    memset(default_def_levels, 0, sizeof(default_def_levels));
+    int16_t default_rep_levels[num_test_rows];
+    memset(default_rep_levels, 0, sizeof(default_rep_levels));
     //  definition levels for optional fields
     int16_t leaf1_def_levels[num_test_rows];
     int16_t leaf2_def_levels[num_test_rows];

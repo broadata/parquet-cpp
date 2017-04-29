@@ -19,70 +19,40 @@
 #define PARQUET_SCHEMA_UTIL_H
 
 #include <string>
-#include <unordered_set>
-#include <vector>
 
 #include "parquet/exception.h"
 #include "parquet/schema.h"
-#include "parquet/types.h"
 #include "parquet/util/logging.h"
 
 using parquet::ParquetException;
 using parquet::SchemaDescriptor;
 using parquet::schema::GroupNode;
-using parquet::schema::NodePtr;
-using parquet::schema::Node;
-using parquet::LogicalType;
 
 inline bool str_endswith_tuple(const std::string& str) {
-  if (str.size() >= 6) {
-    return str.substr(str.size() - 6, 6) == "_tuple";
-  }
+  if (str.size() >= 6) { return str.substr(str.size() - 6, 6) == "_tuple"; }
   return false;
 }
 
 // Special case mentioned in the format spec:
 //   If the name is array or ends in _tuple, this should be a list of struct
 //   even for single child elements.
-inline bool HasStructListName(const GroupNode& node) {
-  return (node.name() == "array" || str_endswith_tuple(node.name()));
+inline bool HasStructListName(const GroupNode* node) {
+  return (node->name() == "array" ||
+          str_endswith_tuple(node->name()));
 }
 
-// TODO(itaiin): This aux. function is to be deleted once repeated structs are supported
-inline bool IsSimpleStruct(const NodePtr& node) {
-  if (!node->is_group()) return false;
-  if (node->is_repeated()) return false;
-  if (node->logical_type() == LogicalType::LIST) return false;
-  // Special case mentioned in the format spec:
-  //   If the name is array or ends in _tuple, this should be a list of struct
-  //   even for single child elements.
-  auto group = static_cast<const GroupNode*>(node.get());
-  if (group->field_count() == 1 && HasStructListName(*group)) return false;
-
-  return true;
-}
-
-// Coalesce a list of schema fields indices which are the roots of the
-// columns referred by a list of column indices
-inline bool ColumnIndicesToFieldIndices(const SchemaDescriptor& descr,
-                                        const std::vector<int>& column_indices,
-                                        std::vector<int>* out) {
-  const GroupNode* group = descr.group_node();
-  std::unordered_set<int> already_added;
-  out->clear();
-  for (auto& column_idx : column_indices) {
-    auto field_node = descr.GetColumnRoot(column_idx);
-    auto field_idx = group->FieldIndex(field_node->name());
-    if (field_idx < 0) {
-      return false;
-    }
-    auto insertion = already_added.insert(field_idx);
-    if (insertion.second) {
-      out->push_back(field_idx);
+// Find the index of the field node under the schema root of a leaf node
+// return a negative result if not found
+inline int ColumnIndexToSchemaFieldIndex(const SchemaDescriptor* schema, int i) {
+  auto field_node = schema->GetColumnRoot(i);
+  auto group = schema->group_node();
+  for (int field_idx = 0; field_idx < group->field_count(); field_idx++) {
+    if (schema->group_node()->field(field_idx) == field_node) {
+      return field_idx;
     }
   }
 
-  return true;
+  return -1;
 }
 
 #endif  // PARQUET_SCHEMA_UTIL_H

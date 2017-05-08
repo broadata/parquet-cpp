@@ -677,15 +677,9 @@ TEST_F(TestSchemaDescriptor, BuildTree) {
   ASSERT_EQ(descr_.Column(5)->path()->ToDotString(), "bag.records.item3");
 
   for (int i = 0; i < nleaves; ++i) {
-    auto col = descr_.Column(i);
-    ASSERT_EQ(i, descr_.ColumnIndex(*col->schema_node().get()));
+      auto col = descr_.Column(i);
+      ASSERT_EQ(i, descr_.ColumnIndex(col->schema_node()));
   }
-
-  // Test non-column nodes find
-  NodePtr non_column_alien = Int32("alien", Repetition::REQUIRED);  // other path
-  NodePtr non_column_familiar = Int32("a", Repetition::REPEATED);   // other node
-  ASSERT_TRUE(descr_.ColumnIndex(*non_column_alien.get()) < 0);
-  ASSERT_TRUE(descr_.ColumnIndex(*non_column_familiar.get()) < 0);
 
   ASSERT_EQ(inta.get(), descr_.GetColumnRoot(0).get());
   ASSERT_EQ(bag.get(), descr_.GetColumnRoot(3).get());

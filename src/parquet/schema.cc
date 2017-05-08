@@ -55,8 +55,8 @@ std::shared_ptr<ColumnPath> ColumnPath::FromNode(const Node& node) {
   }
 
   // Build ColumnPath in correct order
-  std::vector<std::string> path(rpath_.crbegin(), rpath_.crend());
-  return std::make_shared<ColumnPath>(std::move(path));
+  std::vector<std::string> path_(rpath_.crbegin(), rpath_.crend());
+  return std::make_shared<ColumnPath>(std::move(path_));
 }
 
 std::shared_ptr<ColumnPath> ColumnPath::extend(const std::string& node_name) const {
@@ -649,8 +649,7 @@ void SchemaDescriptor::BuildTree(const NodePtr& node, int16_t max_def_level,
     // Primitive node, append to leaves
     leaves_.push_back(ColumnDescriptor(node, max_def_level, max_rep_level, this));
     leaf_to_base_.emplace(static_cast<int>(leaves_.size()) - 1, base);
-    leaf_to_idx_.emplace(node->path()->ToDotString(),
-                         static_cast<int>(leaves_.size()) - 1);
+    leaf_to_idx_.emplace(node->path()->ToDotString(), leaves_.size() - 1);
   }
 }
 
@@ -680,12 +679,11 @@ const ColumnDescriptor* SchemaDescriptor::Column(int i) const {
 }
 
 int SchemaDescriptor::ColumnIndex(const NodePtr& node) const {
-  for (uint i = 0; i < leaves_.size(); i++) {
-    if (leaves_[i].schema_node()->Equals(node.get())) {
-      return i;
-    }
+  auto search = leaf_to_idx_.find(node->path()->ToDotString());
+  if (search == leaf_to_idx_.end()) {
+    return -1;
   }
-  return -1;
+  return search->second;
 }
 
 const schema::NodePtr& SchemaDescriptor::GetColumnRoot(int i) const {

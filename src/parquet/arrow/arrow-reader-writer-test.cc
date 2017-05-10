@@ -1603,12 +1603,15 @@ TEST_F(TestNestedSchemaRead, ReadTablePartial) {
   ASSERT_OK_NO_THROW(reader_->ReadTable({0, 2}, &table));
   ASSERT_EQ(table->num_rows(), NUM_SIMPLE_TEST_ROWS);
   ASSERT_EQ(table->num_columns(), 2);
+  ASSERT_EQ(table->schema()->field(0)->name(), "group1");
+  ASSERT_EQ(table->schema()->field(1)->name(), "leaf3");
   ASSERT_EQ(table->schema()->field(0)->type()->num_children(), 1);
 
   // columns: {group1.leaf1, group1.leaf2}
   ASSERT_OK_NO_THROW(reader_->ReadTable({0, 1}, &table));
   ASSERT_EQ(table->num_rows(), NUM_SIMPLE_TEST_ROWS);
   ASSERT_EQ(table->num_columns(), 1);
+  ASSERT_EQ(table->schema()->field(0)->name(), "group1");
   ASSERT_EQ(table->schema()->field(0)->type()->num_children(), 2);
 
   // columns: {leaf3}
@@ -1617,7 +1620,6 @@ TEST_F(TestNestedSchemaRead, ReadTablePartial) {
   ASSERT_EQ(table->num_columns(), 1);
   ASSERT_EQ(table->schema()->field(0)->name(), "leaf3");
   ASSERT_EQ(table->schema()->field(0)->type()->num_children(), 0);
-  ValidateTableArrayTypes(*table);
 
   // Test with different ordering
   ASSERT_OK_NO_THROW(reader_->ReadTable({2, 0}, &table));
@@ -1626,43 +1628,6 @@ TEST_F(TestNestedSchemaRead, ReadTablePartial) {
   ASSERT_EQ(table->schema()->field(0)->name(), "leaf3");
   ASSERT_EQ(table->schema()->field(1)->name(), "group1");
   ASSERT_EQ(table->schema()->field(1)->type()->num_children(), 1);
-  ValidateTableArrayTypes(*table);
-}
-
-TEST_F(TestNestedSchemaRead, StructAndListTogetherUnsupported) {
-  CreateSimpleNestedParquet(Repetition::REPEATED);
-  std::shared_ptr<Table> table;
-  ASSERT_RAISES(NotImplemented, reader_->ReadTable(&table));
-}
-
-TEST_P(TestNestedSchemaRead, DeepNestedSchemaRead) {
-  const int num_trees = 10;
-  const int depth = 5;
-  const int num_children = 3;
-  int num_rows = SMALL_SIZE * depth;
-  CreateMultiLevelNestedParquet(num_trees, depth, num_children, num_rows, GetParam());
-  std::shared_ptr<Table> table;
-  ASSERT_OK_NO_THROW(reader_->ReadTable(&table));
-  ASSERT_EQ(table->num_columns(), num_trees);
-  ASSERT_EQ(table->num_rows(), num_rows);
-
-  DeepParquetTestVisitor visitor(GetParam(), values_array_);
-  for (int i = 0; i < table->num_columns(); i++) {
-    auto tree = table->column(i)->data()->chunk(0);
-    ASSERT_OK_NO_THROW(visitor.Validate(tree));
-  }
-}
-
-INSTANTIATE_TEST_CASE_P(Repetition_type, TestNestedSchemaRead,
-                        ::testing::Values(Repetition::REQUIRED, Repetition::OPTIONAL));
-
-TEST(TestImpalaConversion, NanosecondToImpala) {
-  // June 20, 2017 16:32:56 and 123456789 nanoseconds
-  int64_t nanoseconds = INT64_C(1497976376123456789);
-  Int96 expected = {{UINT32_C(632093973), UINT32_C(13871), UINT32_C(2457925)}};
-  Int96 calculated;
-  internal::NanosecondsToImpalaTimestamp(nanoseconds, &calculated);
-  ASSERT_EQ(expected, calculated);
 }
 
 TEST_F(TestNestedSchemaRead, StructAndListTogetherUnsupported) {

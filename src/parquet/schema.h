@@ -256,8 +256,7 @@ class PARQUET_EXPORT GroupNode : public Node {
   bool Equals(const Node* other) const override;
 
   const NodePtr& field(int i) const { return fields_[i]; }
-  int FieldIndex(const std::string& name) const;
-  int FieldIndex(const Node& node) const;
+  int FieldIndex(NodePtr& node) const;
 
   int field_count() const { return static_cast<int>(fields_.size()); }
 
@@ -419,7 +418,7 @@ class PARQUET_EXPORT SchemaDescriptor {
   // -- -- -- -- d
   std::unordered_map<int, const schema::NodePtr> leaf_to_base_;
 
-  // Mapping between ColumnPath DotString to the column index
+  // Mapping between ColumnPath DotString to the leaf index
   std::unordered_map<std::string, int> leaf_to_idx_;
 };
 

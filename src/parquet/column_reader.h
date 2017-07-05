@@ -347,6 +347,23 @@ inline void DefinitionLevelsToBitmap(const int16_t* def_levels, int64_t num_def_
   *values_read = (bit_offset + byte_offset * 8 - valid_bits_offset);
 }
 
+inline int16_t GetTopNonRepeatedParentLevel(
+    const schema::Node* node, const int16_t max_definition_level) {
+  auto parent = node->parent();
+  auto top_non_repeated_parent_level = max_definition_level;
+  while (parent != nullptr && !(node->is_repeated())) {
+    node = parent;
+    parent = node->parent();
+    if (!node->is_required())
+      top_non_repeated_parent_level--;
+  }
+
+  if (!(node->is_repeated()))
+    top_non_repeated_parent_level = 0;
+
+  return top_non_repeated_parent_level;
+}
+
 template <typename DType>
 inline int64_t TypedColumnReader<DType>::ReadBatchSpaced(int batch_size,
     int16_t* def_levels, int16_t* rep_levels, T* values, uint8_t* valid_bits,
@@ -418,15 +435,7 @@ inline int64_t TypedColumnReader<DType>::ReadBatchSpaced(int batch_size,
       int16_t max_definition_level = descr_->max_definition_level();
       int16_t max_repetition_level = descr_->max_repetition_level();
 
-      node = descr_->schema_node().get();
-      parent = node->parent();
-      auto top_non_repeated_parent_level = descr_->max_definition_level()-1;
-      while (parent != nullptr && !(parent->is_repeated())){
-        node = parent;
-        parent = node->parent();
-        if (node->is_optional())
-          top_non_repeated_parent_level--;
-      }
+      int16_t top_non_repeated_parent_level = GetTopNonRepeatedParentLevel(node, descr_->max_definition_level());
 
       DefinitionLevelsToBitmap(def_levels, num_def_levels, max_definition_level,
           max_repetition_level, top_non_repeated_parent_level, values_read, &null_count,

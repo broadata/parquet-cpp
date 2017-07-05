@@ -1281,15 +1281,9 @@ Status PrimitiveImpl::ReadByteArrayBatch(
       // descr_->max_definition_level() > 0
       int values_idx = 0;
       int nullable_elements = descr_->schema_node()->is_optional();
-      const schema::Node* top_non_repeated_parent = descr_->schema_node().get();
-      auto parent = descr_->schema_node()->parent();
-      auto top_parent_def_level = descr_->max_definition_level()-1;
-      while (parent != nullptr && !(parent->is_repeated())){
-        top_non_repeated_parent = parent;
-        parent = top_non_repeated_parent->parent();
-        if (top_non_repeated_parent->is_optional())
-          top_parent_def_level = top_parent_def_level-1;
-      }    
+      
+      auto top_parent_def_level = GetTopNonRepeatedParentLevel(
+                descr_->schema_node().get(), descr_->max_definition_level());
       
       for (int64_t i = 0; i < levels_read; i++) {
         if (nullable_elements &&
@@ -1705,15 +1699,8 @@ Status StructImpl::DefLevelsToNullArray(
   size_t def_levels_length;
   RETURN_NOT_OK(GetDefLevels(&def_levels_data, &def_levels_length));
   
-  const schema::Node* top_non_repeated_parent = node_.get();
-  auto parent = node_->parent();
-  auto top_parent_def_level = struct_def_level_-1;
-  while (parent != nullptr && !(parent->is_repeated())){
-    top_non_repeated_parent = parent;
-    parent = top_non_repeated_parent->parent();
-    if (top_non_repeated_parent->is_optional())
-    top_parent_def_level = top_parent_def_level-1;
-  }
+  auto top_parent_def_level = GetTopNonRepeatedParentLevel(node_.get(), 
+                                                           struct_def_level_);
   
   for (size_t i = 0; i < def_levels_length; i++) {
     if (def_levels_data[i] < struct_def_level_) {
@@ -1858,8 +1845,8 @@ Status StructImpl::NextBatch(int batch_size, std::shared_ptr<Array>* out) {
 
   RETURN_NOT_OK(DefLevelsToNullArray(&null_bitmap, &null_count));
 
-  // As the child length might be smaller than the batch_size 
-  int64_t child_length = null_count + children_arrays[0]->length();
+  // As the child length might be smaller than the batch_size   
+  int64_t child_length = children_arrays[0]->length();
 
   *out = std::make_shared<StructArray>(field()->type(), child_length, children_arrays,
     null_bitmap, null_count);

@@ -1217,9 +1217,18 @@ Status PrimitiveImpl::ReadByteArrayBatch(
       // descr_->max_definition_level() > 0
       int values_idx = 0;
       int nullable_elements = descr_->schema_node()->is_optional();
+      auto parent = descr_->schema_node()->parent();
+      int repeated_parent = (parent != nullptr) && parent->is_repeated();
       for (int64_t i = 0; i < levels_read; i++) {
         if (nullable_elements &&
-            (def_levels[i + total_levels_read] == (descr_->max_definition_level() - 1))) {
+            (((repeated_parent) &&
+              // With a repeated parent, this is a list element, so only max-1 level
+              // means null within that list (in other def levels the list is just empty)
+              (def_levels[i + total_levels_read] ==
+                (descr_->max_definition_level() - 1))) ||
+             ((!repeated_parent) &&
+              // Without a repeated parent, an upper level null means null here
+              (def_levels[i + total_levels_read] < descr_->max_definition_level())))) {
           RETURN_NOT_OK(builder.AppendNull());
         } else if (def_levels[i + total_levels_read] == descr_->max_definition_level()) {
           RETURN_NOT_OK(
@@ -1273,9 +1282,18 @@ Status PrimitiveImpl::ReadFLBABatch(
     } else {
       int values_idx = 0;
       int nullable_elements = descr_->schema_node()->is_optional();
+      auto parent = descr_->schema_node()->parent();
+      int repeated_parent = (parent != nullptr) && parent->is_repeated();
       for (int64_t i = 0; i < levels_read; i++) {
         if (nullable_elements &&
-            (def_levels[i + total_levels_read] == (descr_->max_definition_level() - 1))) {
+            (((repeated_parent) &&
+              // With a repeated parent, this is a list element, so only max-1 level
+              // means null within that list (in other def levels the list is just empty)
+              (def_levels[i + total_levels_read] ==
+                (descr_->max_definition_level() - 1))) ||
+             ((!repeated_parent) &&
+              // Without a repeated parent, an upper level null means null here
+              (def_levels[i + total_levels_read] < descr_->max_definition_level())))) {
           RETURN_NOT_OK(builder.AppendNull());
         } else if (def_levels[i + total_levels_read] == descr_->max_definition_level()) {
           RETURN_NOT_OK(builder.Append(values[values_idx].ptr));

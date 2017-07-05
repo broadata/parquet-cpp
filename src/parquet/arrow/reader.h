@@ -194,6 +194,7 @@ class PARQUET_EXPORT ColumnReader {
   friend class FileReader;
   friend class PrimitiveImpl;
   friend class StructImpl;
+  friend class ListImpl;
 };
 
 // Helper function to create a file reader from an implementation of an Arrow

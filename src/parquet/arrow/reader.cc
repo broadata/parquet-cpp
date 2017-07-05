@@ -360,7 +360,7 @@ class StructImpl: public ColumnReader::Impl {
   explicit StructImpl(const std::vector<std::shared_ptr<Impl>>& children,
       int16_t struct_def_level, MemoryPool* pool, const NodePtr& node)
       : children_(children), struct_def_level_(struct_def_level), pool_(pool),
-        def_levels_buffer_(pool), rep_levels_buffer_(pool) {
+        def_levels_buffer_(pool), rep_levels_buffer_(pool) , node_(node){
     InitField(node, children);
   }
 
@@ -379,6 +379,7 @@ class StructImpl: public ColumnReader::Impl {
   std::shared_ptr<Field> field_;
   PoolBuffer def_levels_buffer_;
   PoolBuffer rep_levels_buffer_;
+  NodePtr node_;
 
   Status DefLevelsToNullArray(std::shared_ptr<Buffer>* null_bitmap,
       int64_t* null_count);
@@ -439,7 +440,7 @@ Status FileReader::Impl::GetReaderForNode(int index, const NodePtr& node,
       auto list_group = static_cast<GroupNode*>(group->field(0).get());
       DCHECK(list_group->is_repeated());
       
-      RETURN_NOT_OK(GetReaderForNode(0, list_group->field(0), indices, def_level + 1, 
+      RETURN_NOT_OK(GetReaderForNode(0, list_group->field(0), indices, def_level + 2, 
         &child_reader));
       if (child_reader != nullptr) {
         *out = std::unique_ptr<ColumnReader::Impl>(
@@ -1280,19 +1281,21 @@ Status PrimitiveImpl::ReadByteArrayBatch(
       // descr_->max_definition_level() > 0
       int values_idx = 0;
       int nullable_elements = descr_->schema_node()->is_optional();
-            
-      auto parent = descr_->schema_node()->parent();      
-      int repeated_parent = (parent != nullptr) && parent->is_repeated();
+      const schema::Node* top_non_repeated_parent = descr_->schema_node().get();
+      auto parent = descr_->schema_node()->parent();
+      auto top_parent_def_level = descr_->max_definition_level()-1;
+      while (parent != nullptr && !(parent->is_repeated())){
+        top_non_repeated_parent = parent;
+        parent = top_non_repeated_parent->parent();
+        if (top_non_repeated_parent->is_optional())
+          top_parent_def_level = top_parent_def_level-1;
+      }    
+      
       for (int64_t i = 0; i < levels_read; i++) {
         if (nullable_elements &&
-            (((repeated_parent) &&
-              // With a repeated parent, this is a list element, so only max-1 level
-              // means null within that list (in other def levels the list is just empty)
-              (def_levels[i + total_levels_read] ==
-                (descr_->max_definition_level() - 1))) ||
-             ((!repeated_parent) &&
+            (def_levels[i + total_levels_read] < descr_->max_definition_level()) && 
               // Without a repeated parent, an upper level null means null here
-              (def_levels[i + total_levels_read] == descr_->max_definition_level()-1)))) {
+              (def_levels[i + total_levels_read] >= top_parent_def_level)) {
           RETURN_NOT_OK(builder.AppendNull());
         } else if (def_levels[i + total_levels_read] == descr_->max_definition_level()) {
           RETURN_NOT_OK(
@@ -1701,14 +1704,24 @@ Status StructImpl::DefLevelsToNullArray(
   ValueLevelsPtr def_levels_data;
   size_t def_levels_length;
   RETURN_NOT_OK(GetDefLevels(&def_levels_data, &def_levels_length));
-  //RETURN_NOT_OK(GetEmptyBitmap(pool_,
-  //  def_levels_length, &null_bitmap));
-  //uint8_t* null_bitmap_ptr = null_bitmap->mutable_data();
+  
+  const schema::Node* top_non_repeated_parent = node_.get();
+  auto parent = node_->parent();
+  auto top_parent_def_level = struct_def_level_-1;
+  while (parent != nullptr && !(parent->is_repeated())){
+    top_non_repeated_parent = parent;
+    parent = top_non_repeated_parent->parent();
+    if (top_non_repeated_parent->is_optional())
+    top_parent_def_level = top_parent_def_level-1;
+  }
+  
   for (size_t i = 0; i < def_levels_length; i++) {
     if (def_levels_data[i] < struct_def_level_) {
       // Mark null
-      //null_bitmap_builder->Append(false);
-      //null_count += 1;
+      if (def_levels_data[i] >= top_parent_def_level){
+        null_bitmap_builder->Append(false);
+        null_count += 1;
+      }
     } else {
       //DCHECK_EQ(def_levels_data[i], struct_def_level_);
       //::arrow::BitUtil::SetBit(null_bitmap_ptr, i);

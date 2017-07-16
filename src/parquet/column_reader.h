@@ -352,10 +352,10 @@ inline int16_t GetTopNonRepeatedParentLevel(
   auto parent = node->parent();
   auto top_non_repeated_parent_level = max_definition_level;
   while (parent != nullptr && !(node->is_repeated())) {
-    node = parent;
-    parent = node->parent();
     if (!node->is_required())
       top_non_repeated_parent_level--;
+    node = parent;
+    parent = node->parent();
   }
 
   if (!(node->is_repeated()))
@@ -402,7 +402,8 @@ inline int64_t TypedColumnReader<DType>::ReadBatchSpaced(int batch_size,
     bool has_spaced_values;
     if (descr_->max_repetition_level() > 0) {
       // repeated+flat case
-      has_spaced_values = !descr_->schema_node()->is_required();
+      //has_spaced_values = !descr_->schema_node()->is_required();
+      has_spaced_values = true;
     } else {
       // non-repeated+nested case
       // Find if a node forces nulls in the lowest level along the hierarchy

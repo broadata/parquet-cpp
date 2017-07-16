@@ -402,10 +402,12 @@ Status FileReader::Impl::GetColumn(int i, std::unique_ptr<ColumnReader>* out) {
 }
 
 Status FileReader::Impl::GetReaderForNode(int index, const NodePtr& node,
-    const std::vector<int>& indices, int16_t def_level,
+    const std::vector<int>& indices, int16_t parent_def_level,
     std::unique_ptr<ColumnReader::Impl>* out) {
 
   *out = nullptr;
+
+  auto def_level = node->is_required() ? parent_def_level : parent_def_level+1 ;
 
   if (IsStruct(node)) {
     const schema::GroupNode* group = static_cast<const schema::GroupNode*>(node.get());
@@ -416,7 +418,7 @@ Status FileReader::Impl::GetReaderForNode(int index, const NodePtr& node,
       // are supported. This currently just signals the lower level reader resolution
       // to abort
       RETURN_NOT_OK(GetReaderForNode(index, group->field(i), indices,
-        def_level + 1, &child_reader));
+        def_level , &child_reader));
       if (child_reader != nullptr) {
         children.push_back(std::move(child_reader));
       }
@@ -440,14 +442,11 @@ Status FileReader::Impl::GetReaderForNode(int index, const NodePtr& node,
       auto list_group = static_cast<GroupNode*>(group->field(0).get());
       DCHECK(list_group->is_repeated());
       
-      RETURN_NOT_OK(GetReaderForNode(0, list_group->field(0), indices, def_level + 2, 
+      RETURN_NOT_OK(GetReaderForNode(0, list_group->field(0), indices, def_level + 1, 
         &child_reader));
       if (child_reader != nullptr) {
         *out = std::unique_ptr<ColumnReader::Impl>(
            new ListImpl(std::move(child_reader), def_level, pool_, node));
-      } else {
-        return Status::NotImplemented(
-            "Currently can not handle null vhild readers");
       }           
     } else {
       auto column_index = reader_->metadata()->schema()->ColumnIndex(*walker.get());
@@ -481,8 +480,8 @@ Status FileReader::Impl::ReadSchemaField(int i, const std::vector<int>& indices,
 
   auto node = parquet_schema->group_node()->field(i);
   std::unique_ptr<ColumnReader::Impl> reader_impl;
-
-  RETURN_NOT_OK(GetReaderForNode(i, node, indices, 1, &reader_impl));
+  
+  RETURN_NOT_OK(GetReaderForNode(i, node, indices, 0, &reader_impl));
   if (reader_impl == nullptr) {
     *out = nullptr;
     return Status::OK();

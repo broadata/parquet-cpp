@@ -281,9 +281,7 @@ int GroupNode::FieldIndex(const Node& node) const {
   return result;
 }
 
-void GroupNode::Visit(Node::Visitor* visitor) {
-  visitor->Visit(this);
-}
+void GroupNode::Visit(Node::Visitor* visitor) { visitor->Visit(this); }
 
 int GroupNode::FieldIndex(const Node& node) const {
   int result = FieldIndex(node.name());
@@ -666,8 +664,8 @@ void SchemaDescriptor::BuildTree(const NodePtr& node, int16_t max_def_level,
     // Primitive node, append to leaves
     leaves_.push_back(ColumnDescriptor(node, max_def_level, max_rep_level, this));
     leaf_to_base_.emplace(static_cast<int>(leaves_.size()) - 1, base);
-    leaf_to_idx_.emplace(
-        node->path()->ToDotString(), static_cast<int>(leaves_.size()) - 1);
+    leaf_to_idx_.emplace(node->path()->ToDotString(),
+                         static_cast<int>(leaves_.size()) - 1);
   }
 }
 

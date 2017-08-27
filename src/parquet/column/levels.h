@@ -36,12 +36,12 @@ class PARQUET_EXPORT LevelEncoder {
   LevelEncoder();
   ~LevelEncoder();
 
-  static int MaxBufferSize(
-      Encoding::type encoding, int16_t max_level, int num_buffered_values);
+  static int MaxBufferSize(Encoding::type encoding, int16_t max_level,
+                           int num_buffered_values);
 
   // Initialize the LevelEncoder.
   void Init(Encoding::type encoding, int16_t max_level, int num_buffered_values,
-      uint8_t* data, int data_size);
+            uint8_t* data, int data_size);
 
   // Encodes a batch of levels from an array and returns the number of levels encoded
   int Encode(int batch_size, const int16_t* levels);
@@ -69,7 +69,7 @@ class PARQUET_EXPORT LevelDecoder {
   // Initialize the LevelDecoder state with new data
   // and return the number of bytes consumed
   int SetData(Encoding::type encoding, int16_t max_level, int num_buffered_values,
-      const uint8_t* data);
+              const uint8_t* data);
 
   // Decodes a batch of levels into an array and returns the number of levels decoded
   int Decode(int batch_size, int16_t* levels);

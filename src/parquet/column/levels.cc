@@ -27,7 +27,7 @@ LevelEncoder::LevelEncoder() {}
 LevelEncoder::~LevelEncoder() {}
 
 void LevelEncoder::Init(Encoding::type encoding, int16_t max_level,
-    int num_buffered_values, uint8_t* data, int data_size) {
+                        int num_buffered_values, uint8_t* data, int data_size) {
   bit_width_ = BitUtil::Log2(max_level + 1);
   encoding_ = encoding;
   switch (encoding) {
@@ -46,8 +46,8 @@ void LevelEncoder::Init(Encoding::type encoding, int16_t max_level,
   }
 }
 
-int LevelEncoder::MaxBufferSize(
-    Encoding::type encoding, int16_t max_level, int num_buffered_values) {
+int LevelEncoder::MaxBufferSize(Encoding::type encoding, int16_t max_level,
+                                int num_buffered_values) {
   int bit_width = BitUtil::Log2(max_level + 1);
   int num_bytes = 0;
   switch (encoding) {
@@ -76,14 +76,18 @@ int LevelEncoder::Encode(int batch_size, const int16_t* levels) {
 
   if (encoding_ == Encoding::RLE) {
     for (int i = 0; i < batch_size; ++i) {
-      if (!rle_encoder_->Put(*(levels + i))) { break; }
+      if (!rle_encoder_->Put(*(levels + i))) {
+        break;
+      }
       ++num_encoded;
     }
     rle_encoder_->Flush();
     rle_length_ = rle_encoder_->len();
   } else {
     for (int i = 0; i < batch_size; ++i) {
-      if (!bit_packed_encoder_->PutValue(*(levels + i), bit_width_)) { break; }
+      if (!bit_packed_encoder_->PutValue(*(levels + i), bit_width_)) {
+        break;
+      }
       ++num_encoded;
     }
     bit_packed_encoder_->Flush();
@@ -96,7 +100,7 @@ LevelDecoder::LevelDecoder() : num_values_remaining_(0) {}
 LevelDecoder::~LevelDecoder() {}
 
 int LevelDecoder::SetData(Encoding::type encoding, int16_t max_level,
-    int num_buffered_values, const uint8_t* data) {
+                          int num_buffered_values, const uint8_t* data) {
   int32_t num_bytes = 0;
   encoding_ = encoding;
   num_values_remaining_ = num_buffered_values;

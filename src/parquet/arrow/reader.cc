@@ -27,7 +27,6 @@
 #include <vector>
 
 #include "parquet/arrow/schema.h"
-#include "parquet/util/bit-util.h"
 #include "parquet/util/schema-util.h"
 
 #include "arrow/api.h"
@@ -237,7 +236,7 @@ class ColumnReader::Impl {
 };
 
 // Reader implementation for primitive arrays
-class PrimitiveImpl : public ColumnReader::Impl {
+class PARQUET_NO_EXPORT PrimitiveImpl : public ColumnReader::Impl {
  public:
   PrimitiveImpl(MemoryPool* pool, std::unique_ptr<FileColumnIterator> input)
       : pool_(pool),
@@ -279,11 +278,6 @@ class PrimitiveImpl : public ColumnReader::Impl {
   Status GetDefLevels(ValueLevelsPtr* data, size_t* length) override;
   Status GetRepLevels(ValueLevelsPtr* data, size_t* length) override;
 
-  const std::shared_ptr<Field> field() override { return field_; }
-
-  Status GetDefLevels(ValueLevelsPtr* data, size_t* length) override;
-  Status GetRepLevels(ValueLevelsPtr* data, size_t* length) override;
-
   int16_t GetMaxRepLevel() const override { return descr_->max_repetition_level(); }
 
   const std::shared_ptr<Field> field() override { return field_; }
@@ -318,7 +312,7 @@ class PrimitiveImpl : public ColumnReader::Impl {
 };
 
 // Reader implementation for struct array
-class ListImpl : public ColumnReader::Impl {
+class PARQUET_NO_EXPORT ListImpl : public ColumnReader::Impl {
  public:
   explicit ListImpl(const std::shared_ptr<Impl>& child, int16_t list_def_level,
                     MemoryPool* pool, const NodePtr& node)
@@ -354,7 +348,7 @@ class ListImpl : public ColumnReader::Impl {
 };
 
 // Reader implementation for struct array
-class StructImpl : public ColumnReader::Impl {
+class PARQUET_NO_EXPORT StructImpl : public ColumnReader::Impl {
  public:
   explicit StructImpl(const std::vector<std::shared_ptr<Impl>>& children,
                       int16_t struct_def_level, MemoryPool* pool, const NodePtr& node)
@@ -572,14 +566,7 @@ Status FileReader::Impl::ReadTable(const std::vector<int>& indices,
     return Status::Invalid("Invalid column index");
   }
 
-  // We only need to read schema fields which have columns indicated
-  // in the indices vector
-  std::vector<int> field_indices;
-  if (!ColumnIndicesToFieldIndices(*reader_->metadata()->schema(), indices,
-                                   &field_indices)) {
-    return Status::Invalid("Invalid column index");
-  }
-
+  std::vector<std::shared_ptr<Column>> columns(field_indices.size());
   auto ReadColumnFunc = [&indices, &field_indices, &schema, &columns, this](int i) {
     std::shared_ptr<Array> array;
     RETURN_NOT_OK(ReadSchemaField(field_indices[i], indices, &array));
@@ -1178,14 +1165,14 @@ Status PrimitiveImpl::TypedReadBatch<::arrow::BooleanType, BooleanType>(
   if (descr_->max_repetition_level() > 0) {
     RETURN_NOT_OK(rep_levels_buffer_.Resize(batch_size * sizeof(int16_t), false));
   }
-  int16_t* def_levels = reinterpret_cast<int16_t*>(def_levels_buffer_.mutable_data());
-  int16_t* rep_levels = reinterpret_cast<int16_t*>(rep_levels_buffer_.mutable_data());
 
   while ((values_to_read > 0) && column_reader_) {
     auto reader = dynamic_cast<TypedColumnReader<BooleanType>*>(column_reader_.get());
     int64_t values_read;
     int64_t levels_read;
-    int16_t* def_levels = reinterpret_cast<int16_t*>(def_levels_buffer_.mutable_data());
+    auto def_levels = reinterpret_cast<int16_t*>(def_levels_buffer_.mutable_data());
+    auto rep_levels = reinterpret_cast<int16_t*>(rep_levels_buffer_.mutable_data());
+
     if (descr_->max_definition_level() == 0) {
       RETURN_NOT_OK((ReadNonNullableBatch<::arrow::BooleanType, BooleanType>(
           reader, values_to_read, &values_read)));
@@ -1535,7 +1522,7 @@ Status ListImpl::GetDefLevels(ValueLevelsPtr* data, size_t* length) {
   }
 
   auto size = list_length * sizeof(int16_t);
-  def_levels_buffer_.Resize(size);
+  RETURN_NOT_OK(def_levels_buffer_.Resize(size));
   // Initialize with the minimal def level
   std::memset(def_levels_buffer_.mutable_data(), -1, size);
   auto result_levels = reinterpret_cast<int16_t*>(def_levels_buffer_.mutable_data());
@@ -1587,7 +1574,7 @@ Status ListImpl::GetRepLevels(ValueLevelsPtr* data, size_t* length) {
   }
 
   auto size = list_length * sizeof(int16_t);
-  rep_levels_buffer_.Resize(size);
+  RETURN_NOT_OK(rep_levels_buffer_.Resize(size));
 
   // Initialize with the maximal rep level
   std::memset(rep_levels_buffer_.mutable_data(), child_max_repetition, size);
@@ -1607,7 +1594,7 @@ Status ListImpl::GetRepLevels(ValueLevelsPtr* data, size_t* length) {
 
 Status ListImpl::RepLevelsToOffsetsArray(std::shared_ptr<Buffer>* offsets_array_out,
                                          int64_t* length) {
-  auto offset_builder = std::make_shared<::arrow::Int32Builder>(pool_, ::arrow::int32());
+  ::arrow::Int32Builder offset_builder(::arrow::int32(), pool_);
 
   ValueLevelsPtr child_rep_levels;
   size_t child_length;
@@ -1621,7 +1608,7 @@ Status ListImpl::RepLevelsToOffsetsArray(std::shared_ptr<Buffer>* offsets_array_
   uint64_t child_val_idx = 0;
   uint64_t child_def_idx = 0;
   for (uint64_t list_idx = 0; list_idx < def_levels_length; list_idx++) {
-    RETURN_NOT_OK(offset_builder->Append(child_val_idx));
+    RETURN_NOT_OK(offset_builder.Append(child_val_idx));
 
     // Only if the def level is bigger than the list def level, the offset would
     // be increased.
@@ -1637,12 +1624,12 @@ Status ListImpl::RepLevelsToOffsetsArray(std::shared_ptr<Buffer>* offsets_array_
   }
 
   // Add the finsl offset to the list
-  RETURN_NOT_OK(offset_builder->Append(child_val_idx));
+  RETURN_NOT_OK(offset_builder.Append(child_val_idx));
 
   std::shared_ptr<Array> array;
-  *length = offset_builder->length() - 1;
-  RETURN_NOT_OK(offset_builder->Finish(&array));
-  *offsets_array_out = std::static_pointer_cast<Int32Array>(array)->data();
+  *length = offset_builder.length() - 1;
+  RETURN_NOT_OK(offset_builder.Finish(&array));
+  *offsets_array_out = std::static_pointer_cast<Int32Array>(array)->values();
   DCHECK_EQ(*length, def_levels_length);
   return Status::OK();
 }
@@ -1682,8 +1669,8 @@ Status ListImpl::NextBatch(int batch_size, std::shared_ptr<Array>* out) {
 
 Status StructImpl::DefLevelsToNullArray(std::shared_ptr<Buffer>* null_bitmap_out,
                                         int64_t* null_count_out) {
-  auto null_bitmap_builder =
-      std::make_shared<::arrow::BooleanBuilder>(pool_, ::arrow::boolean());
+  ::arrow::BooleanBuilder null_bitmap_builder(::arrow::boolean(), pool_);
+
   // std::shared_ptr<MutableBuffer> null_bitmap;
   auto null_count = 0;
   ValueLevelsPtr def_levels_data;
@@ -1697,24 +1684,24 @@ Status StructImpl::DefLevelsToNullArray(std::shared_ptr<Buffer>* null_bitmap_out
     if (def_levels_data[i] < struct_def_level_) {
       // Mark null
       if (def_levels_data[i] >= top_parent_def_level) {
-        null_bitmap_builder->Append(false);
+        RETURN_NOT_OK(null_bitmap_builder.Append(false));
         null_count += 1;
       }
     } else {
       // DCHECK_EQ(def_levels_data[i], struct_def_level_);
       //::arrow::BitUtil::SetBit(null_bitmap_ptr, i);
-      null_bitmap_builder->Append(true);
+      RETURN_NOT_OK(null_bitmap_builder.Append(true));
     }
   }
 
   *null_count_out = null_count;
   std::shared_ptr<Array> array;
-  RETURN_NOT_OK(null_bitmap_builder->Finish(&array));
+  RETURN_NOT_OK(null_bitmap_builder.Finish(&array));
 
   if (null_count == 0) {
     *null_bitmap_out = nullptr;
   } else {
-    *null_bitmap_out = std::static_pointer_cast<BooleanArray>(array)->data();
+    *null_bitmap_out = std::static_pointer_cast<BooleanArray>(array)->values();
   }
 
   return Status::OK();
@@ -1735,7 +1722,7 @@ Status StructImpl::GetDefLevels(ValueLevelsPtr* data, size_t* length) {
   size_t child_length;
   RETURN_NOT_OK(children_[0]->GetDefLevels(&child_def_levels, &child_length));
   auto size = child_length * sizeof(int16_t);
-  def_levels_buffer_.Resize(size);
+  RETURN_NOT_OK(def_levels_buffer_.Resize(size));
   // Initialize with the minimal def level
   std::memset(def_levels_buffer_.mutable_data(), -1, size);
   auto result_levels = reinterpret_cast<int16_t*>(def_levels_buffer_.mutable_data());
@@ -1799,7 +1786,7 @@ Status StructImpl::GetRepLevels(ValueLevelsPtr* data, size_t* length) {
   size_t child_length;
   RETURN_NOT_OK(children_[0]->GetRepLevels(&child_rep_levels, &child_length));
   auto size = child_length * sizeof(int16_t);
-  rep_levels_buffer_.Resize(size);
+  RETURN_NOT_OK(rep_levels_buffer_.Resize(size));
   int16_t max_repetition = children_[0]->GetMaxRepLevel();
   // Initialize with the maximal rep level
   std::memset(rep_levels_buffer_.mutable_data(), max_repetition, size);

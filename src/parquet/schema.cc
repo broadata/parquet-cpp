@@ -283,21 +283,6 @@ int GroupNode::FieldIndex(const Node& node) const {
 
 void GroupNode::Visit(Node::Visitor* visitor) { visitor->Visit(this); }
 
-int GroupNode::FieldIndex(const Node& node) const {
-  int result = FieldIndex(node.name());
-  if (result < 0) {
-    return -1;
-  }
-  DCHECK(result < field_count());
-  if (!node.Equals(field(result).get())) {
-    // Same name but not the same node
-    return -1;
-  }
-  return result;
-}
-
-void GroupNode::Visit(Node::Visitor* visitor) { visitor->Visit(this); }
-
 void GroupNode::VisitConst(Node::ConstVisitor* visitor) const { visitor->Visit(this); }
 
 // ----------------------------------------------------------------------

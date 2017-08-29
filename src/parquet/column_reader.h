@@ -365,7 +365,7 @@ inline int16_t GetTopNonRepeatedParentLevel(const schema::Node* node,
 
 template <typename DType>
 inline int64_t TypedColumnReader<DType>::ReadBatchSpaced(
-    int batch_size, int16_t* def_levels, int16_t* rep_levels, T* values,
+    int64_t batch_size, int16_t* def_levels, int16_t* rep_levels, T* values,
     uint8_t* valid_bits, int64_t valid_bits_offset, int64_t* levels_read,
     int64_t* values_read, int64_t* null_count_out) {
   const schema::Node* node = descr_->schema_node().get();

@@ -1422,7 +1422,7 @@ class TestNestedSchemaRead : public ::testing::TestWithParam<Repetition::type> {
 
     // Produce values for the columns
     MakeValues(NUM_SIMPLE_TEST_ROWS);
-    int32_t* values = reinterpret_cast<int32_t*>(values_array_->data()->mutable_data());
+    int32_t* values = reinterpret_cast<int32_t*>(values_array_->values()->mutable_data());
 
     // Create the actual parquet file
     InitNewParquetFile(std::static_pointer_cast<GroupNode>(schema_node),
@@ -1438,27 +1438,6 @@ class TestNestedSchemaRead : public ::testing::TestWithParam<Repetition::type> {
     WriteColumnData(NUM_SIMPLE_TEST_ROWS, leaf3_def_levels.data(), rep_levels.data(),
                     values);
 
-    std::vector<int16_t> def_levels(num_rows);
-    std::vector<int16_t> rep_levels(num_rows);
-    for (int i = 0; i < num_rows; i++) {
-      if (node_repetition == Repetition::REQUIRED) {
-        def_levels[i] = 0;  // all is required
-      } else {
-        def_levels[i] = i % tree_depth;  // all is optional
-      }
-      rep_levels[i] = 0;  // none is repeated
-    }
-
-    // Produce values for the columns
-    MakeValues(num_rows);
-    int32_t* values = reinterpret_cast<int32_t*>(values_array_->values()->mutable_data());
-
-    // Create the actual parquet file
-    InitNewParquetFile(std::static_pointer_cast<GroupNode>(schema_node), num_rows);
-
-    for (int i = 0; i < num_columns; i++) {
-      WriteColumnData(num_rows, def_levels.data(), rep_levels.data(), values);
-    }
     FinalizeParquetFile();
     InitReader();
   }
@@ -1508,7 +1487,7 @@ class TestNestedSchemaRead : public ::testing::TestWithParam<Repetition::type> {
 
     // Produce values for the columns
     MakeValues(num_rows);
-    int32_t* values = reinterpret_cast<int32_t*>(values_array_->data()->mutable_data());
+    int32_t* values = reinterpret_cast<int32_t*>(values_array_->values()->mutable_data());
 
     // Create the actual parquet file
     InitNewParquetFile(std::static_pointer_cast<GroupNode>(schema_node), num_rows);
@@ -1548,7 +1527,8 @@ class TestNestedSchemaRead : public ::testing::TestWithParam<Repetition::type> {
     }
 
     virtual Status Visit(const ::arrow::StructArray& array) {
-      for (auto& child : array.fields()) {
+      for (int i = 0; i < array.num_fields(); ++i) {
+        auto child = array.field(i);
         if (node_repetition_ == Repetition::REQUIRED) {
           RETURN_NOT_OK(child->Accept(this));
         } else if (node_repetition_ == Repetition::OPTIONAL) {

@@ -45,6 +45,7 @@ namespace test {
 template <typename T>
 static inline bool vector_equal_with_def_levels(const vector<T>& left,
                                                 const vector<int16_t>& def_levels,
+                                                const vector<int16_t>& rep_levels,
                                                 int16_t max_def_levels,
                                                 int16_t max_rep_levels,
                                                 const vector<T>& right) {
@@ -65,7 +66,7 @@ static inline bool vector_equal_with_def_levels(const vector<T>& left,
       i_right++;
     } else if (def_levels[i] < (max_def_levels - 1)) {
       // Null entry on a higher nesting level, only supported for non-repeating data
-      if (max_rep_levels == 0) {
+      if ((max_rep_levels == 0) || (rep_levels[i] == max_rep_levels)){
         i_right++;
       }
     }
@@ -134,7 +135,7 @@ class TestPrimitiveReader : public ::testing::Test {
     int64_t values_read;
 
     Int32Reader* reader = static_cast<Int32Reader*>(reader_.get());
-    int32_t batch_size = 8;
+    int32_t batch_size = 5000;
     int batch = 0;
     // This will cover both the cases
     // 1) batch_size < page_size (multiple ReadBatch from a single page)
@@ -154,7 +155,7 @@ class TestPrimitiveReader : public ::testing::Test {
     ASSERT_EQ(num_values_, total_values_read);
     if (max_def_level_ > 0) {
       ASSERT_TRUE(vector_equal(def_levels_, dresult));
-      ASSERT_TRUE(vector_equal_with_def_levels(values_, dresult, max_def_level_,
+      ASSERT_TRUE(vector_equal_with_def_levels(values_, dresult, rresult, max_def_level_,
                                                max_rep_level_, vresult));
     } else {
       ASSERT_TRUE(vector_equal(values_, vresult));

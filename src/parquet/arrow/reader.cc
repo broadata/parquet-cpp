@@ -193,8 +193,9 @@ class FileReader::Impl {
   Status ReadSchemaField(int i, std::shared_ptr<Array>* out);
   Status ReadSchemaField(int i, const std::vector<int>& indices,
                          std::shared_ptr<Array>* out);
-  Status GetReaderForNode(int index, const NodePtr& node, const std::vector<int>& indices,
-                          int16_t def_level, std::unique_ptr<ColumnReader::Impl>* out);
+  Status GetReaderForNode(const NodePtr& node, const std::vector<int>& indices,
+                          int16_t parent_def_level, int16_t parent_rep_level,
+                          std::unique_ptr<ColumnReader::Impl>* out);
   Status ReadColumn(int i, std::shared_ptr<Array>* out);
   Status GetSchema(std::shared_ptr<::arrow::Schema>* out);
   Status GetSchema(const std::vector<int>& indices,
@@ -223,6 +224,8 @@ class FileReader::Impl {
   int num_threads_;
 };
 
+// TODO(itaiin): Use a decent container for this, since ownership is
+//               becoming an issue.
 typedef const int16_t* ValueLevelsPtr;
 
 class ColumnReader::Impl {
@@ -231,7 +234,7 @@ class ColumnReader::Impl {
   virtual Status NextBatch(int batch_size, std::shared_ptr<Array>* out) = 0;
   virtual Status GetDefLevels(ValueLevelsPtr* data, size_t* length) = 0;
   virtual Status GetRepLevels(ValueLevelsPtr* data, size_t* length) = 0;
-  virtual int16_t GetMaxRepLevel() const = 0;
+  virtual int16_t max_rep_level() const = 0;
   virtual const std::shared_ptr<Field> field() = 0;
 };
 
@@ -278,7 +281,7 @@ class PARQUET_NO_EXPORT PrimitiveImpl : public ColumnReader::Impl {
   Status GetDefLevels(ValueLevelsPtr* data, size_t* length) override;
   Status GetRepLevels(ValueLevelsPtr* data, size_t* length) override;
 
-  int16_t GetMaxRepLevel() const override { return descr_->max_repetition_level(); }
+  int16_t max_rep_level() const override { return descr_->max_repetition_level(); }
 
   const std::shared_ptr<Field> field() override { return field_; }
 
@@ -314,14 +317,15 @@ class PARQUET_NO_EXPORT PrimitiveImpl : public ColumnReader::Impl {
 // Reader implementation for struct array
 class PARQUET_NO_EXPORT ListImpl : public ColumnReader::Impl {
  public:
-  explicit ListImpl(const std::shared_ptr<Impl>& child, int16_t list_def_level,
+  explicit ListImpl(const std::shared_ptr<Impl>& child,
+                    int16_t list_def_level, int16_t list_rep_level,
                     MemoryPool* pool, const NodePtr& node)
       : child_(child),
         list_def_level_(list_def_level),
-        pool_(pool),
-        def_levels_buffer_(pool),
-        rep_levels_buffer_(pool) {
+        list_rep_level_(list_rep_level),
+        pool_(pool) {
     InitField(node, child);
+    DCHECK(list_rep_level_ == child_->max_rep_level() - 1);
   }
 
   virtual ~ListImpl() {}
@@ -329,16 +333,19 @@ class PARQUET_NO_EXPORT ListImpl : public ColumnReader::Impl {
   Status NextBatch(int batch_size, std::shared_ptr<Array>* out) override;
   Status GetDefLevels(ValueLevelsPtr* data, size_t* length) override;
   Status GetRepLevels(ValueLevelsPtr* data, size_t* length) override;
-  int16_t GetMaxRepLevel() const override;
+  int16_t max_rep_level() const override { return list_rep_level_; }
   const std::shared_ptr<Field> field() override { return field_; }
 
  private:
+  size_t CountNumLists(ValueLevelsPtr& rep_levels, size_t length);
+
   std::shared_ptr<Impl> child_;
   int16_t list_def_level_;
+  int16_t list_rep_level_;
   MemoryPool* pool_;
   std::shared_ptr<Field> field_;
-  PoolBuffer def_levels_buffer_;
-  PoolBuffer rep_levels_buffer_;
+  std::shared_ptr<Buffer> def_levels_buffer_;
+  std::shared_ptr<Buffer> rep_levels_buffer_;
 
   Status DefLevelsToNullArray(std::shared_ptr<MutableBuffer>* null_bitmap,
                               int64_t* null_count);
@@ -351,9 +358,11 @@ class PARQUET_NO_EXPORT ListImpl : public ColumnReader::Impl {
 class PARQUET_NO_EXPORT StructImpl : public ColumnReader::Impl {
  public:
   explicit StructImpl(const std::vector<std::shared_ptr<Impl>>& children,
-                      int16_t struct_def_level, MemoryPool* pool, const NodePtr& node)
+                      int16_t struct_def_level, int16_t struct_rep_level,
+                      MemoryPool* pool, const NodePtr& node)
       : children_(children),
         struct_def_level_(struct_def_level),
+        struct_rep_level_(struct_rep_level),
         pool_(pool),
         def_levels_buffer_(pool),
         rep_levels_buffer_(pool),
@@ -366,12 +375,13 @@ class PARQUET_NO_EXPORT StructImpl : public ColumnReader::Impl {
   Status NextBatch(int batch_size, std::shared_ptr<Array>* out) override;
   Status GetDefLevels(ValueLevelsPtr* data, size_t* length) override;
   Status GetRepLevels(ValueLevelsPtr* data, size_t* length) override;
-  int16_t GetMaxRepLevel() const override;
+  int16_t max_rep_level() const override { return struct_rep_level_; }
   const std::shared_ptr<Field> field() override { return field_; }
 
  private:
   std::vector<std::shared_ptr<Impl>> children_;
   int16_t struct_def_level_;
+  int16_t struct_rep_level_ = -1;
   MemoryPool* pool_;
   std::shared_ptr<Field> field_;
   PoolBuffer def_levels_buffer_;
@@ -395,24 +405,33 @@ Status FileReader::Impl::GetColumn(int i, std::unique_ptr<ColumnReader>* out) {
   return Status::OK();
 }
 
-Status FileReader::Impl::GetReaderForNode(int index, const NodePtr& node,
+Status FileReader::Impl::GetReaderForNode(const NodePtr& node,
                                           const std::vector<int>& indices,
                                           int16_t parent_def_level,
+                                          int16_t parent_rep_level,
                                           std::unique_ptr<ColumnReader::Impl>* out) {
   *out = nullptr;
 
   auto def_level = node->is_required() ? parent_def_level : parent_def_level + 1;
 
-  if (IsStruct(node)) {
+  if (node->is_primitive()) {
+    auto column_index = reader_->metadata()->schema()->ColumnIndex(*node.get());
+
+    // If the index of the column is found then a reader for the coliumn is needed.
+    // Otherwise *out keeps the nullptr value.
+    if (std::find(indices.begin(), indices.end(), column_index) != indices.end()) {
+      std::unique_ptr<ColumnReader> reader;
+      RETURN_NOT_OK(GetColumn(column_index, &reader));
+      *out = std::move(reader->impl_);
+    }
+  } else if (IsStruct(node)) {
     const schema::GroupNode* group = static_cast<const schema::GroupNode*>(node.get());
     std::vector<std::shared_ptr<ColumnReader::Impl>> children;
     for (int i = 0; i < group->field_count(); i++) {
       std::unique_ptr<ColumnReader::Impl> child_reader;
-      // TODO(itaiin): Remove the -1 index hack when all types of nested reads
-      // are supported. This currently just signals the lower level reader resolution
-      // to abort
       RETURN_NOT_OK(
-          GetReaderForNode(index, group->field(i), indices, def_level, &child_reader));
+          GetReaderForNode(group->field(i), indices, def_level, parent_rep_level,
+                           &child_reader));
       if (child_reader != nullptr) {
         children.push_back(std::move(child_reader));
       }
@@ -420,38 +439,28 @@ Status FileReader::Impl::GetReaderForNode(int index, const NodePtr& node,
 
     if (children.size() > 0) {
       *out = std::unique_ptr<ColumnReader::Impl>(
-          new StructImpl(children, def_level, pool_, node));
+          new StructImpl(children, def_level, parent_rep_level, pool_, node));
     }
   } else {
-    // This should be a flat field case - translate the field index to
-    // the correct column index by walking down to the leaf node
-    NodePtr walker = node;
-    if (!walker->is_primitive()) {
-      DCHECK(walker->is_group());
+    DCHECK(node->is_group());
 
-      // A group which is not a struct is LIST
-      DCHECK(node->logical_type() == LogicalType::LIST);
-      std::unique_ptr<ColumnReader::Impl> child_reader;
-      auto group = static_cast<GroupNode*>(walker.get());
-      auto list_group = static_cast<GroupNode*>(group->field(0).get());
-      DCHECK(list_group->is_repeated());
+    // A group which is not a struct is LIST
+    // todo(itaiin): actually this could be a map, which is similar
+    DCHECK(node->logical_type() == LogicalType::LIST);
+    std::unique_ptr<ColumnReader::Impl> child_reader;
+    auto group = static_cast<GroupNode*>(node.get());
+    auto list_group = static_cast<GroupNode*>(group->field(0).get());
+    DCHECK(list_group->is_repeated());
 
-      RETURN_NOT_OK(GetReaderForNode(0, list_group->field(0), indices, def_level + 1,
-                                     &child_reader));
-      if (child_reader != nullptr) {
-        *out = std::unique_ptr<ColumnReader::Impl>(
-            new ListImpl(std::move(child_reader), def_level, pool_, node));
-      }
-    } else {
-      auto column_index = reader_->metadata()->schema()->ColumnIndex(*walker.get());
-
-      // If the index of the column is found then a reader for the coliumn is needed.
-      // Otherwise *out keeps the nullptr value.
-      if (std::find(indices.begin(), indices.end(), column_index) != indices.end()) {
-        std::unique_ptr<ColumnReader> reader;
-        RETURN_NOT_OK(GetColumn(column_index, &reader));
-        *out = std::move(reader->impl_);
-      }
+    // Repeated level always increases max def level
+    int16_t const list_def_level = def_level + 1;
+    int16_t const list_rep_level = parent_rep_level + 1;
+    RETURN_NOT_OK(GetReaderForNode(list_group->field(0), indices, list_def_level,
+                                    list_rep_level, &child_reader));
+    if (child_reader != nullptr) {
+      *out = std::unique_ptr<ColumnReader::Impl>(
+          new ListImpl(std::move(child_reader), def_level, parent_rep_level, pool_,
+                        node));
     }
   }
 
@@ -475,7 +484,7 @@ Status FileReader::Impl::ReadSchemaField(int i, const std::vector<int>& indices,
   auto node = parquet_schema->group_node()->field(i);
   std::unique_ptr<ColumnReader::Impl> reader_impl;
 
-  RETURN_NOT_OK(GetReaderForNode(i, node, indices, 0, &reader_impl));
+  RETURN_NOT_OK(GetReaderForNode(node, indices, 0, 0, &reader_impl));
   if (reader_impl == nullptr) {
     *out = nullptr;
     return Status::OK();
@@ -1474,6 +1483,12 @@ Status ColumnReader::NextBatch(int batch_size, std::shared_ptr<Array>* out) {
 
 Status ListImpl::DefLevelsToNullArray(std::shared_ptr<MutableBuffer>* null_bitmap_out,
                                       int64_t* null_count_out) {
+  if (!field_->nullable()) {
+    *null_bitmap_out = nullptr;
+    *null_count_out = 0;
+    return Status::OK();
+  }
+
   std::shared_ptr<MutableBuffer> null_bitmap;
   auto null_count = 0;
   ValueLevelsPtr def_levels_data;
@@ -1482,7 +1497,7 @@ Status ListImpl::DefLevelsToNullArray(std::shared_ptr<MutableBuffer>* null_bitma
   RETURN_NOT_OK(GetEmptyBitmap(pool_, def_levels_length, &null_bitmap));
   uint8_t* null_bitmap_ptr = null_bitmap->mutable_data();
   for (size_t i = 0; i < def_levels_length; i++) {
-    if (def_levels_data[i] < list_def_level_) {
+    if (def_levels_data[i] == list_def_level_ - 1) {
       // Mark null
       null_count += 1;
     } else {
@@ -1496,99 +1511,90 @@ Status ListImpl::DefLevelsToNullArray(std::shared_ptr<MutableBuffer>* null_bitma
   return Status::OK();
 }
 
+size_t ListImpl::CountNumLists(ValueLevelsPtr& rep_levels, size_t num_levels) {
+  size_t result = 0;
+  for (size_t i = 0; i < num_levels; i++) {
+    if (rep_levels[i] <= list_rep_level_) {
+      result++;
+    }
+  }
+  return result;
+}
+
 Status ListImpl::GetDefLevels(ValueLevelsPtr* data, size_t* length) {
   *data = nullptr;
   if (!child_) {
-    // Empty listt
+    // Empty list
     *length = 0;
     return Status::OK();
   }
 
-  // We have at least one child
+  ::arrow::Int16Builder builder(pool_);
+
+  // We have one child
   ValueLevelsPtr child_def_levels, child_rep_levels;
   size_t child_length, child_rep_length;
-  size_t i, j;
+  //size_t i, j;
   RETURN_NOT_OK(child_->GetDefLevels(&child_def_levels, &child_length));
   RETURN_NOT_OK(child_->GetRepLevels(&child_rep_levels, &child_rep_length));
 
   DCHECK_EQ(child_length, child_rep_length);
-  int16_t child_max_repetition = child_->GetMaxRepLevel();
-  // Find the number of lists
-  size_t list_length = 0;
-  for (size_t i = 0; i < child_length; i++) {
-    if (child_rep_levels[i] < child_max_repetition) {
-      list_length++;
-    }
-  }
+  int16_t child_max_repetition = child_->max_rep_level();
 
-  auto size = list_length * sizeof(int16_t);
-  RETURN_NOT_OK(def_levels_buffer_.Resize(size));
-  // Initialize with the minimal def level
-  std::memset(def_levels_buffer_.mutable_data(), -1, size);
-  auto result_levels = reinterpret_cast<int16_t*>(def_levels_buffer_.mutable_data());
-
-  // When a struct is defined, all of its children def levels are at least at
-  // nesting level, and def level equals nesting level.
-  // When a struct is not defined, all of its children def levels are less than
-  // the nesting level, and the def level equals max(children def levels)
-  // All other possibilities are malformed definition data.
-
-  for (i = 0, j = 0; i < list_length; i++) {
+  // For each list, the definition level is the either the list level when its defined,
+  // or less if it or one of its ancestors
+  size_t idx = 0;
+  while (idx < child_length) {
+    int16_t def_level = -1;
     do {
-      result_levels[i] =
-          std::max(result_levels[i],
-                   std::min(child_def_levels[j], (int16_t)(list_def_level_ + 1)));
-      j++;
-    } while (j < child_length && child_rep_levels[j] >= child_max_repetition);
+      def_level = std::max(def_level, child_def_levels[idx]);
+      idx++;
+    } while (idx < child_length &&
+             child_rep_levels[idx] >= child_max_repetition);
+    builder.Append(std::min(def_level, (int16_t)(list_def_level_ + 1)));
   }
-  *data = reinterpret_cast<ValueLevelsPtr>(def_levels_buffer_.data());
-  *length = list_length;
+
+  def_levels_buffer_ = builder.data();
+  *data = reinterpret_cast<ValueLevelsPtr>(def_levels_buffer_->data());
+  *length = builder.length();
   return Status::OK();
 }
 
 void ListImpl::InitField(const NodePtr& node, const std::shared_ptr<Impl>& child) {
   auto type = std::make_shared<::arrow::ListType>(child->field());
-  field_ = std::make_shared<Field>(node->name(), type);
+  field_ = std::make_shared<Field>(node->name(), type, node->is_optional());
 }
 
 Status ListImpl::GetRepLevels(ValueLevelsPtr* data, size_t* length) {
   *data = nullptr;
   if (!child_) {
-    // list with no child - is that a valid case?
+    // TODO(itaiin): throw an exception here
     *length = 0;
     return Status::OK();
   }
 
-  // We have at least one child
+  ::arrow::Int16Builder builder(pool_);
+
   ValueLevelsPtr child_rep_levels;
   size_t child_length;
   RETURN_NOT_OK(child_->GetRepLevels(&child_rep_levels, &child_length));
-  int16_t child_max_repetition = child_->GetMaxRepLevel();
-  // Find the number of lists
-  size_t list_length = 0;
-  size_t i, j;
-  for (i = 0; i < child_length; i++) {
-    if (child_rep_levels[i] < child_max_repetition) {
-      list_length++;
-    }
-  }
+  int16_t child_max_repetition = child_->max_rep_level();
 
-  auto size = list_length * sizeof(int16_t);
-  RETURN_NOT_OK(rep_levels_buffer_.Resize(size));
-
-  // Initialize with the maximal rep level
-  std::memset(rep_levels_buffer_.mutable_data(), child_max_repetition, size);
-  auto result_levels = reinterpret_cast<int16_t*>(rep_levels_buffer_.mutable_data());
-
-  for (i = 0, j = 0; i < list_length; i++) {
+  size_t idx = 0;
+  while (idx < child_length) {
+    int16_t level = list_rep_level_;
     do {
-      result_levels[i] = std::min(result_levels[i], child_rep_levels[j]);
-      j++;
-    } while (j < child_length && child_rep_levels[j] >= child_max_repetition);
+      level = std::min(level, child_rep_levels[idx]);
+      idx++;
+    } while ((idx < child_length) &&
+             (child_rep_levels[idx] >= child_max_repetition));
+    builder.Append(level);
   }
 
-  *data = reinterpret_cast<ValueLevelsPtr>(rep_levels_buffer_.data());
-  *length = list_length;
+  rep_levels_buffer_ = builder.data();
+  *data = reinterpret_cast<ValueLevelsPtr>(rep_levels_buffer_->data());
+  *length = builder.length();
+  //DCHECK_EQ(builder.length(), CountNumLists(child_rep_levels, child_length));
   return Status::OK();
 }
 
@@ -1596,51 +1602,46 @@ Status ListImpl::RepLevelsToOffsetsArray(std::shared_ptr<Buffer>* offsets_array_
                                          int64_t* length) {
   ::arrow::Int32Builder offset_builder(::arrow::int32(), pool_);
 
+  ValueLevelsPtr def_levels_data;
   ValueLevelsPtr child_rep_levels;
   size_t child_length;
-  RETURN_NOT_OK(child_->GetRepLevels(&child_rep_levels, &child_length));
-
-  ValueLevelsPtr def_levels_data;
   size_t def_levels_length;
   RETURN_NOT_OK(GetDefLevels(&def_levels_data, &def_levels_length));
-  int16_t max_rep_level = GetMaxRepLevel();
+  RETURN_NOT_OK(child_->GetRepLevels(&child_rep_levels, &child_length));
 
   uint64_t child_val_idx = 0;
-  uint64_t child_def_idx = 0;
-  for (uint64_t list_idx = 0; list_idx < def_levels_length; list_idx++) {
-    RETURN_NOT_OK(offset_builder.Append(child_val_idx));
+  uint64_t child_rep_idx = 0;
+  int16_t node_level = field_->nullable() ? list_def_level_ - 1 : list_def_level_;
+  for (uint64_t idx = 0; idx < def_levels_length; idx++) {
+    // Only mark an entry when the value is defined at the list node level or below,
+    // to prevent marking nulls from the upper levels
+    if (def_levels_data[idx] >= node_level) {
+      RETURN_NOT_OK(offset_builder.Append(child_val_idx));
+    }
 
-    // Only if the def level is bigger than the list def level, the offset would
-    // be increased.
-    if (def_levels_data[list_idx] > list_def_level_) {
+    // Increase the offset only when the list is defined and non-empty
+    if (def_levels_data[idx] > list_def_level_) {
+      // Walk over the values belonging to the current list
       do {
-        child_def_idx++;
+        child_rep_idx++;
         child_val_idx++;
-      } while ((child_def_idx < child_length) &&
-               (child_rep_levels[child_def_idx] > max_rep_level));
+      } while ((child_rep_idx < child_length) &&
+               (child_rep_levels[child_rep_idx] > list_rep_level_));
     } else {
-      child_def_idx++;
+      // Undefined list value, so the rep level is meaningless
+      child_rep_idx++;
     }
   }
 
-  // Add the finsl offset to the list
+  // Add the final offset to the list
   RETURN_NOT_OK(offset_builder.Append(child_val_idx));
 
   std::shared_ptr<Array> array;
   *length = offset_builder.length() - 1;
   RETURN_NOT_OK(offset_builder.Finish(&array));
   *offsets_array_out = std::static_pointer_cast<Int32Array>(array)->values();
-  DCHECK_EQ(*length, def_levels_length);
+  //DCHECK_EQ(*length, def_levels_length);
   return Status::OK();
-}
-
-int16_t ListImpl::GetMaxRepLevel() const {
-  if (!child_) {
-    // Empty list - is that an valid case?
-    return 0;
-  }
-
-  return child_->GetMaxRepLevel() - 1;
 }
 
 Status ListImpl::NextBatch(int batch_size, std::shared_ptr<Array>* out) {
@@ -1764,15 +1765,6 @@ void StructImpl::InitField(const NodePtr& node,
   field_ = std::make_shared<Field>(node->name(), type);
 }
 
-int16_t StructImpl::GetMaxRepLevel() const {
-  if (children_.size() == 0) {
-    // Empty struct - is that an valid case?
-    return 0;
-  }
-
-  return children_[0]->GetMaxRepLevel();
-}
-
 Status StructImpl::GetRepLevels(ValueLevelsPtr* data, size_t* length) {
   *data = nullptr;
   if (children_.size() == 0) {
@@ -1787,7 +1779,7 @@ Status StructImpl::GetRepLevels(ValueLevelsPtr* data, size_t* length) {
   RETURN_NOT_OK(children_[0]->GetRepLevels(&child_rep_levels, &child_length));
   auto size = child_length * sizeof(int16_t);
   RETURN_NOT_OK(rep_levels_buffer_.Resize(size));
-  int16_t max_repetition = children_[0]->GetMaxRepLevel();
+  int16_t max_repetition = children_[0]->max_rep_level();
   // Initialize with the maximal rep level
   std::memset(rep_levels_buffer_.mutable_data(), max_repetition, size);
   auto result_levels = reinterpret_cast<int16_t*>(rep_levels_buffer_.mutable_data());

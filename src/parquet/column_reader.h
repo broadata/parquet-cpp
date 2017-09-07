@@ -309,27 +309,16 @@ inline void DefinitionLevelsToBitmap(const int16_t* def_levels, int64_t num_def_
   int bit_offset = static_cast<int>(valid_bits_offset) % 8;
   uint8_t bitset = valid_bits[byte_offset];
 
-  // TODO(itaiin): As an interim solution we are splitting the code path here
-  // between repeated+flat column reads, and non-repeated+nested reads.
-  // Those paths need to be merged in the future
   for (int i = 0; i < num_def_levels; ++i) {
     if (def_levels[i] == max_definition_level) {
       bitset |= (1 << bit_offset);
-    } else if (max_repetition_level > 0) {
-      // repetition+flat case
+    } else {
       if (def_levels[i] >= top_non_repeated_parent_level) {
+        // An upper nesting level which inflicts a null at the lowest level
         bitset &= ~(1 << bit_offset);
         *null_count += 1;
       } else {
         continue;
-      }
-    } else {
-      // non-repeated+nested case
-      if (def_levels[i] < max_definition_level) {
-        bitset &= ~(1 << bit_offset);
-        *null_count += 1;
-      } else {
-        throw ParquetException("definition level exceeds maximum");
       }
     }
 
@@ -351,16 +340,37 @@ inline void DefinitionLevelsToBitmap(const int16_t* def_levels, int64_t num_def_
 inline int16_t GetTopNonRepeatedParentLevel(const schema::Node* node,
                                             const int16_t max_definition_level) {
   auto parent = node->parent();
-  auto top_non_repeated_parent_level = max_definition_level;
+  auto result = max_definition_level;
   while (parent != nullptr && !(node->is_repeated())) {
-    if (!node->is_required()) top_non_repeated_parent_level--;
+    if (!node->is_required()) result--;
     node = parent;
     parent = node->parent();
   }
 
-  if (!(node->is_repeated())) top_non_repeated_parent_level = 0;
+  if (!(node->is_repeated())) {
+    result = 0;
+  }
 
-  return top_non_repeated_parent_level;
+  return result;
+}
+
+// Finds out wether the node should have its values spaced
+// Optional groups (structs) require spacing in children while
+// repeated groups (lists, maps) forbid it.
+inline bool HasSpacedValues(const schema::Node* node) {
+  const schema::Node* parent;
+
+  while (node) {
+    parent = node->parent();
+    if (node->is_repeated()) {
+      // No need for lower level null due to a list
+      return false;
+    } else if (node->is_optional()) {
+      return true;
+    }
+    node = parent;
+  }
+  return false;
 }
 
 template <typename DType>
@@ -369,7 +379,6 @@ inline int64_t TypedColumnReader<DType>::ReadBatchSpaced(
     uint8_t* valid_bits, int64_t valid_bits_offset, int64_t* levels_read,
     int64_t* values_read, int64_t* null_count_out) {
   const schema::Node* node = descr_->schema_node().get();
-  const schema::Node* parent;
 
   // HasNext invokes ReadNewPage
   if (!HasNext()) {
@@ -396,29 +405,8 @@ inline int64_t TypedColumnReader<DType>::ReadBatchSpaced(
       }
     }
 
-    // TODO(itaiin): another code path split to merge when the general case is done
-    bool has_spaced_values;
-    if (descr_->max_repetition_level() > 0) {
-      // repeated+flat case
-      // has_spaced_values = !descr_->schema_node()->is_required();
-      has_spaced_values = true;
-    } else {
-      // non-repeated+nested case
-      // Find if a node forces nulls in the lowest level along the hierarchy
-      has_spaced_values = false;
-
-      while (node) {
-        parent = node->parent();
-        if (node->is_optional()) {
-          has_spaced_values = true;
-          break;
-        }
-        node = parent;
-      }
-    }
-
     int64_t null_count = 0;
-    if (!has_spaced_values) {
+    if (!HasSpacedValues(node)) {
       int values_to_read = 0;
       for (int64_t i = 0; i < num_def_levels; ++i) {
         if (def_levels[i] == descr_->max_definition_level()) {

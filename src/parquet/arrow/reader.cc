@@ -234,6 +234,7 @@ class ColumnReader::Impl {
   virtual Status NextBatch(int batch_size, std::shared_ptr<Array>* out) = 0;
   virtual Status GetDefLevels(ValueLevelsPtr* data, size_t* length) = 0;
   virtual Status GetRepLevels(ValueLevelsPtr* data, size_t* length) = 0;
+  virtual int16_t max_def_level() const = 0;
   virtual int16_t max_rep_level() const = 0;
   virtual const std::shared_ptr<Field> field() = 0;
 };
@@ -281,6 +282,7 @@ class PARQUET_NO_EXPORT PrimitiveImpl : public ColumnReader::Impl {
   Status GetDefLevels(ValueLevelsPtr* data, size_t* length) override;
   Status GetRepLevels(ValueLevelsPtr* data, size_t* length) override;
 
+  int16_t max_def_level() const override { return descr_->max_definition_level(); }
   int16_t max_rep_level() const override { return descr_->max_repetition_level(); }
 
   const std::shared_ptr<Field> field() override { return field_; }
@@ -319,10 +321,11 @@ class PARQUET_NO_EXPORT ListImpl : public ColumnReader::Impl {
  public:
   explicit ListImpl(const std::shared_ptr<Impl>& child,
                     int16_t list_def_level, int16_t list_rep_level,
-                    MemoryPool* pool, const NodePtr& node)
+                    bool is_spaced, MemoryPool* pool, const NodePtr& node)
       : child_(child),
         list_def_level_(list_def_level),
         list_rep_level_(list_rep_level),
+        is_spaced_(is_spaced),
         pool_(pool) {
     InitField(node, child);
     DCHECK(list_rep_level_ == child_->max_rep_level() - 1);
@@ -333,6 +336,7 @@ class PARQUET_NO_EXPORT ListImpl : public ColumnReader::Impl {
   Status NextBatch(int batch_size, std::shared_ptr<Array>* out) override;
   Status GetDefLevels(ValueLevelsPtr* data, size_t* length) override;
   Status GetRepLevels(ValueLevelsPtr* data, size_t* length) override;
+  int16_t max_def_level() const override { return list_def_level_; }
   int16_t max_rep_level() const override { return list_rep_level_; }
   const std::shared_ptr<Field> field() override { return field_; }
 
@@ -342,12 +346,15 @@ class PARQUET_NO_EXPORT ListImpl : public ColumnReader::Impl {
   std::shared_ptr<Impl> child_;
   int16_t list_def_level_;
   int16_t list_rep_level_;
+  int16_t is_spaced_;
   MemoryPool* pool_;
   std::shared_ptr<Field> field_;
   std::shared_ptr<Buffer> def_levels_buffer_;
   std::shared_ptr<Buffer> rep_levels_buffer_;
+  size_t num_def_levels_;
+  size_t num_rep_levels_;
 
-  Status DefLevelsToNullArray(std::shared_ptr<MutableBuffer>* null_bitmap,
+  Status DefLevelsToNullArray(std::shared_ptr<Buffer>* null_bitmap,
                               int64_t* null_count);
   Status RepLevelsToOffsetsArray(std::shared_ptr<Buffer>* offsets_array_out,
                                  int64_t* length);
@@ -375,6 +382,7 @@ class PARQUET_NO_EXPORT StructImpl : public ColumnReader::Impl {
   Status NextBatch(int batch_size, std::shared_ptr<Array>* out) override;
   Status GetDefLevels(ValueLevelsPtr* data, size_t* length) override;
   Status GetRepLevels(ValueLevelsPtr* data, size_t* length) override;
+  int16_t max_def_level() const override { return struct_def_level_; }
   int16_t max_rep_level() const override { return struct_rep_level_; }
   const std::shared_ptr<Field> field() override { return field_; }
 
@@ -445,22 +453,34 @@ Status FileReader::Impl::GetReaderForNode(const NodePtr& node,
     DCHECK(node->is_group());
 
     // A group which is not a struct is LIST
-    // todo(itaiin): actually this could be a map, which is similar
-    DCHECK(node->logical_type() == LogicalType::LIST);
     std::unique_ptr<ColumnReader::Impl> child_reader;
     auto group = static_cast<GroupNode*>(node.get());
-    auto list_group = static_cast<GroupNode*>(group->field(0).get());
-    DCHECK(list_group->is_repeated());
+    auto rep_group = static_cast<GroupNode*>(group->field(0).get());
+    DCHECK(rep_group->is_repeated());
+    if (node->logical_type() == LogicalType::LIST) {
+      const NodePtr& element_node = rep_group->field(0);
+      // Repeated level always increases max def level
+      const int16_t list_def_level = def_level + 1;
+      RETURN_NOT_OK(GetReaderForNode(element_node, indices,
+                                     list_def_level, parent_rep_level + 1,
+                                     &child_reader));
+    } else {
+      DCHECK((node->logical_type() == LogicalType::MAP) ||
+             (node->logical_type() == LogicalType::MAP_KEY_VALUE));
+      // The repeated group is itself a struct
+      DCHECK_EQ(rep_group->field(0)->name(), "key");
+      DCHECK_EQ(rep_group->field(1)->name(), "value");
+      RETURN_NOT_OK(GetReaderForNode(group->field(0), indices,
+                                     def_level, parent_rep_level + 1,
+                                     &child_reader));
+    }
 
-    // Repeated level always increases max def level
-    int16_t const list_def_level = def_level + 1;
-    int16_t const list_rep_level = parent_rep_level + 1;
-    RETURN_NOT_OK(GetReaderForNode(list_group->field(0), indices, list_def_level,
-                                    list_rep_level, &child_reader));
     if (child_reader != nullptr) {
+      // TODO(itaiin): is_spaced is not just if the parent is optional,
+      //               but if there's an optional ancestor without a repeated one
       *out = std::unique_ptr<ColumnReader::Impl>(
-          new ListImpl(std::move(child_reader), def_level, parent_rep_level, pool_,
-                        node));
+          new ListImpl(std::move(child_reader), def_level, parent_rep_level,
+                       node->is_optional(), pool_, node));
     }
   }
 
@@ -1481,33 +1501,27 @@ Status ColumnReader::NextBatch(int batch_size, std::shared_ptr<Array>* out) {
 
 // ListImpl methods
 
-Status ListImpl::DefLevelsToNullArray(std::shared_ptr<MutableBuffer>* null_bitmap_out,
+Status ListImpl::DefLevelsToNullArray(std::shared_ptr<Buffer>* null_bitmap_out,
                                       int64_t* null_count_out) {
-  if (!field_->nullable()) {
-    *null_bitmap_out = nullptr;
-    *null_count_out = 0;
-    return Status::OK();
-  }
-
-  std::shared_ptr<MutableBuffer> null_bitmap;
+  ::arrow::BooleanBuilder null_bitmap_builder(::arrow::boolean(), pool_);
   auto null_count = 0;
   ValueLevelsPtr def_levels_data;
   size_t def_levels_length;
   RETURN_NOT_OK(GetDefLevels(&def_levels_data, &def_levels_length));
-  RETURN_NOT_OK(GetEmptyBitmap(pool_, def_levels_length, &null_bitmap));
-  uint8_t* null_bitmap_ptr = null_bitmap->mutable_data();
   for (size_t i = 0; i < def_levels_length; i++) {
-    if (def_levels_data[i] == list_def_level_ - 1) {
+    if (def_levels_data[i] >= list_def_level_) {
+      null_bitmap_builder.Append(true);
+    } else if (is_spaced_ && def_levels_data[i] == list_def_level_ - 1) {
       // Mark null
       null_count += 1;
+      null_bitmap_builder.Append(false);
     } else {
-      // DCHECK_EQ(def_levels_data[i], list_def_level_);
-      ::arrow::BitUtil::SetBit(null_bitmap_ptr, i);
+      // skip
     }
   }
 
   *null_count_out = null_count;
-  *null_bitmap_out = (null_count == 0) ? nullptr : null_bitmap;
+  *null_bitmap_out = (null_count == 0) ? nullptr : null_bitmap_builder.data();
   return Status::OK();
 }
 
@@ -1529,34 +1543,39 @@ Status ListImpl::GetDefLevels(ValueLevelsPtr* data, size_t* length) {
     return Status::OK();
   }
 
-  ::arrow::Int16Builder builder(pool_);
+  // Build the list definition levels if necessary
+  if (def_levels_buffer_ == nullptr) {
+    ::arrow::Int16Builder builder(pool_);
 
-  // We have one child
-  ValueLevelsPtr child_def_levels, child_rep_levels;
-  size_t child_length, child_rep_length;
-  //size_t i, j;
-  RETURN_NOT_OK(child_->GetDefLevels(&child_def_levels, &child_length));
-  RETURN_NOT_OK(child_->GetRepLevels(&child_rep_levels, &child_rep_length));
+    // We have one child
+    ValueLevelsPtr child_def_levels, child_rep_levels;
+    size_t child_length, child_rep_length;
+    //size_t i, j;
+    RETURN_NOT_OK(child_->GetDefLevels(&child_def_levels, &child_length));
+    RETURN_NOT_OK(child_->GetRepLevels(&child_rep_levels, &child_rep_length));
 
-  DCHECK_EQ(child_length, child_rep_length);
-  int16_t child_max_repetition = child_->max_rep_level();
+    DCHECK_EQ(child_length, child_rep_length);
+    int16_t child_max_repetition = child_->max_rep_level();
 
-  // For each list, the definition level is the either the list level when its defined,
-  // or less if it or one of its ancestors
-  size_t idx = 0;
-  while (idx < child_length) {
-    int16_t def_level = -1;
-    do {
-      def_level = std::max(def_level, child_def_levels[idx]);
-      idx++;
-    } while (idx < child_length &&
-             child_rep_levels[idx] >= child_max_repetition);
-    builder.Append(std::min(def_level, (int16_t)(list_def_level_ + 1)));
+    // For each list, the definition level is the either the list level when its defined,
+    // or less if it or one of its ancestors
+    size_t i = 0;
+    while (i < child_length) {
+      int16_t def_level = -1;
+      do {
+        def_level = std::max(def_level, child_def_levels[i]);
+        i++;
+      } while (i < child_length &&
+              child_rep_levels[i] >= child_max_repetition);
+      builder.Append(std::min(def_level, (int16_t)(list_def_level_)));
+    }
+
+    def_levels_buffer_ = builder.data();
+    num_def_levels_ = builder.length();
   }
 
-  def_levels_buffer_ = builder.data();
   *data = reinterpret_cast<ValueLevelsPtr>(def_levels_buffer_->data());
-  *length = builder.length();
+  *length = num_def_levels_;
   return Status::OK();
 }
 
@@ -1573,27 +1592,31 @@ Status ListImpl::GetRepLevels(ValueLevelsPtr* data, size_t* length) {
     return Status::OK();
   }
 
-  ::arrow::Int16Builder builder(pool_);
+  // Build the list repetition levels if necessary
+  if (rep_levels_buffer_ == nullptr) {
+    ::arrow::Int16Builder builder(pool_);
 
-  ValueLevelsPtr child_rep_levels;
-  size_t child_length;
-  RETURN_NOT_OK(child_->GetRepLevels(&child_rep_levels, &child_length));
-  int16_t child_max_repetition = child_->max_rep_level();
+    ValueLevelsPtr child_rep_levels;
+    size_t child_length;
+    RETURN_NOT_OK(child_->GetRepLevels(&child_rep_levels, &child_length));
+    int16_t child_max_repetition = child_->max_rep_level();
 
-  size_t idx = 0;
-  while (idx < child_length) {
-    int16_t level = list_rep_level_;
-    do {
-      level = std::min(level, child_rep_levels[idx]);
-      idx++;
-    } while ((idx < child_length) &&
-             (child_rep_levels[idx] >= child_max_repetition));
-    builder.Append(level);
+    size_t idx = 0;
+    while (idx < child_length) {
+      int16_t level = list_rep_level_;
+      do {
+        level = std::min(level, child_rep_levels[idx]);
+        idx++;
+      } while ((idx < child_length) &&
+              (child_rep_levels[idx] >= child_max_repetition));
+      builder.Append(level);
+    }
+
+    rep_levels_buffer_ = builder.data();
+    num_rep_levels_ = builder.length();
   }
-
-  rep_levels_buffer_ = builder.data();
   *data = reinterpret_cast<ValueLevelsPtr>(rep_levels_buffer_->data());
-  *length = builder.length();
+  *length = num_rep_levels_;
   //DCHECK_EQ(builder.length(), CountNumLists(child_rep_levels, child_length));
   return Status::OK();
 }
@@ -1603,38 +1626,42 @@ Status ListImpl::RepLevelsToOffsetsArray(std::shared_ptr<Buffer>* offsets_array_
   ::arrow::Int32Builder offset_builder(::arrow::int32(), pool_);
 
   ValueLevelsPtr def_levels_data;
+  ValueLevelsPtr child_def_levels;
   ValueLevelsPtr child_rep_levels;
   size_t child_length;
   size_t def_levels_length;
   RETURN_NOT_OK(GetDefLevels(&def_levels_data, &def_levels_length));
+  RETURN_NOT_OK(child_->GetDefLevels(&child_def_levels, &child_length));
   RETURN_NOT_OK(child_->GetRepLevels(&child_rep_levels, &child_length));
 
   uint64_t child_val_idx = 0;
-  uint64_t child_rep_idx = 0;
-  int16_t node_level = field_->nullable() ? list_def_level_ - 1 : list_def_level_;
-  for (uint64_t idx = 0; idx < def_levels_length; idx++) {
-    // Only mark an entry when the value is defined at the list node level or below,
-    // to prevent marking nulls from the upper levels
-    if (def_levels_data[idx] >= node_level) {
-      RETURN_NOT_OK(offset_builder.Append(child_val_idx));
-    }
-
+  uint64_t child_level_idx = 0;
+  int16_t min_def_level = (is_spaced_ ? list_def_level_ - 1 : list_def_level_);
+  int16_t max_child_def_level = child_->max_def_level();
+  RETURN_NOT_OK(offset_builder.Append(0));
+  for (size_t i = 0; i < def_levels_length; i++) {
     // Increase the offset only when the list is defined and non-empty
-    if (def_levels_data[idx] > list_def_level_) {
+    if ((def_levels_data[i] == list_def_level_) &&
+        (child_def_levels[child_level_idx] >= max_child_def_level)) {
       // Walk over the values belonging to the current list
       do {
-        child_rep_idx++;
+        child_level_idx++;
         child_val_idx++;
-      } while ((child_rep_idx < child_length) &&
-               (child_rep_levels[child_rep_idx] > list_rep_level_));
+      } while ((child_level_idx < child_length) &&
+               (child_rep_levels[child_level_idx] > list_rep_level_));
     } else {
-      // Undefined list value, so the rep level is meaningless
-      child_rep_idx++;
+      // Undefined or empty list value
+      child_level_idx++;
+    }
+    // Only mark an entry when the value is defined at the list node level or below,
+    // or a null is propegated from above
+    if (def_levels_data[i] >= min_def_level) {
+      RETURN_NOT_OK(offset_builder.Append(child_val_idx));
     }
   }
 
-  // Add the final offset to the list
-  RETURN_NOT_OK(offset_builder.Append(child_val_idx));
+  // // Add the final offset to the list
+  // RETURN_NOT_OK(offset_builder.Append(child_val_idx));
 
   std::shared_ptr<Array> array;
   *length = offset_builder.length() - 1;
@@ -1646,16 +1673,12 @@ Status ListImpl::RepLevelsToOffsetsArray(std::shared_ptr<Buffer>* offsets_array_
 
 Status ListImpl::NextBatch(int batch_size, std::shared_ptr<Array>* out) {
   std::shared_ptr<Buffer> offsets;
-  std::shared_ptr<MutableBuffer> null_bitmap;
+  std::shared_ptr<Buffer> null_bitmap;
   int64_t null_count;
   std::shared_ptr<Array> child_array;
   int64_t list_length;
 
-  // auto raw_offsets = offsets == nullptr
-  //                           ? nullptr
-  //                           : reinterpret_cast<const int32_t*>(offsets->data());
-
-  RETURN_NOT_OK(child_->NextBatch(3 * batch_size, &child_array));
+  RETURN_NOT_OK(child_->NextBatch(10 * batch_size, &child_array));
 
   RETURN_NOT_OK(DefLevelsToNullArray(&null_bitmap, &null_count));
   RETURN_NOT_OK(RepLevelsToOffsetsArray(&offsets, &list_length));
@@ -1672,7 +1695,6 @@ Status StructImpl::DefLevelsToNullArray(std::shared_ptr<Buffer>* null_bitmap_out
                                         int64_t* null_count_out) {
   ::arrow::BooleanBuilder null_bitmap_builder(::arrow::boolean(), pool_);
 
-  // std::shared_ptr<MutableBuffer> null_bitmap;
   auto null_count = 0;
   ValueLevelsPtr def_levels_data;
   size_t def_levels_length;
@@ -1689,8 +1711,6 @@ Status StructImpl::DefLevelsToNullArray(std::shared_ptr<Buffer>* null_bitmap_out
         null_count += 1;
       }
     } else {
-      // DCHECK_EQ(def_levels_data[i], struct_def_level_);
-      //::arrow::BitUtil::SetBit(null_bitmap_ptr, i);
       RETURN_NOT_OK(null_bitmap_builder.Append(true));
     }
   }

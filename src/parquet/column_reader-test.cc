@@ -65,8 +65,8 @@ static inline bool vector_equal_with_def_levels(const vector<T>& left,
       // Null entry on the lowest nested level
       i_right++;
     } else if (def_levels[i] < (max_def_levels - 1)) {
-      // Null entry on a higher nesting level, only supported for non-repeating data
-      if ((max_rep_levels == 0) || (rep_levels[i] == max_rep_levels)){
+      // Null entry on a higher nesting level that inflicts a null at the lowest level
+      if (max_rep_levels == 0) {
         i_right++;
       }
     }

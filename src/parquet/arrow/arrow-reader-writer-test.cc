@@ -1624,7 +1624,7 @@ TEST_F(TestNestedSchemaRead, ReadTablePartial) {
   ValidateTableArrayTypes(*table);
 }
 
-TEST_F(TestNestedSchemaRead, StructAndListTogetherUnsupported) {
+TEST_F(TestNestedSchemaRead, DISABLED_StructAndListTogetherUnsupported) {
   CreateSimpleNestedParquet(Repetition::REPEATED);
   std::shared_ptr<Table> table;
   ASSERT_RAISES(NotImplemented, reader_->ReadTable(&table));

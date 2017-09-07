@@ -53,20 +53,8 @@ inline bool IsStruct(const NodePtr& node) {
   if (!node->is_group()) return false;
 
   if (node->logical_type() == LogicalType::LIST) return false;
-  // Special case mentioned in the format spec:
-  //   If the name is array or ends in _tuple, this should be a list of struct
-  //   even for single child elements.
-  auto group = static_cast<const GroupNode*>(node.get());
-  if (group->field_count() == 1 && HasStructListName(*group)) return false;
-
-  return true;
-}
-
-// TODO(itaiin): This aux. function is to be deleted once repeated structs are supported
-inline bool IsSimpleStruct(const NodePtr& node) {
-  if (!node->is_group()) return false;
-  if (node->is_repeated()) return false;
-  if (node->logical_type() == LogicalType::LIST) return false;
+  if (node->logical_type() == LogicalType::MAP) return false;
+  if (node->logical_type() == LogicalType::MAP_KEY_VALUE) return false;
   // Special case mentioned in the format spec:
   //   If the name is array or ends in _tuple, this should be a list of struct
   //   even for single child elements.

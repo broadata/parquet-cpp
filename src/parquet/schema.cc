@@ -98,6 +98,29 @@ bool Node::EqualsInternal(const Node* other) const {
 
 void Node::SetParent(const Node* parent) { parent_ = parent; }
 
+bool Node::HasSpacedValues() const {
+  // Because of the 3-level structure, the repeated node
+  // does not "own" the values themselves
+  DCHECK(!this->is_repeated());
+
+  const schema::Node* walker = this;
+  // Optional struct arrays require spaces in their child arrays, even when
+  // they are themselves not optional. This is inherited down the tree until
+  // a repeated field is reached (or leaf)
+  while (walker) {
+    if (walker->is_repeated()) {
+      // No need for lower level space due to a list
+      return false;
+    } else if (walker->is_optional()) {
+      // A space is needed due to an optional ancestor
+      return true;
+    }
+    walker = walker->parent();
+  }
+  // Reached the top of the schema without any optional ancestors
+  return false;
+}
+
 // ----------------------------------------------------------------------
 // Primitive node
 

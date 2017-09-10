@@ -321,11 +321,11 @@ class PARQUET_NO_EXPORT ListImpl : public ColumnReader::Impl {
  public:
   explicit ListImpl(const std::shared_ptr<Impl>& child,
                     int16_t list_def_level, int16_t list_rep_level,
-                    bool is_spaced, MemoryPool* pool, const NodePtr& node)
+                    MemoryPool* pool, const NodePtr& node)
       : child_(child),
         list_def_level_(list_def_level),
         list_rep_level_(list_rep_level),
-        is_spaced_(is_spaced),
+        is_spaced_(node->HasSpacedValues()),
         pool_(pool) {
     InitField(node, child);
     DCHECK(list_rep_level_ == child_->max_rep_level() - 1);
@@ -480,7 +480,7 @@ Status FileReader::Impl::GetReaderForNode(const NodePtr& node,
       //               but if there's an optional ancestor without a repeated one
       *out = std::unique_ptr<ColumnReader::Impl>(
           new ListImpl(std::move(child_reader), def_level, parent_rep_level,
-                       node->is_optional(), pool_, node));
+                       pool_, node));
     }
   }
 
@@ -1516,7 +1516,7 @@ Status ListImpl::DefLevelsToNullArray(std::shared_ptr<Buffer>* null_bitmap_out,
       null_count += 1;
       null_bitmap_builder.Append(false);
     } else {
-      // skip
+      // Skip this value
     }
   }
 
@@ -1601,14 +1601,14 @@ Status ListImpl::GetRepLevels(ValueLevelsPtr* data, size_t* length) {
     RETURN_NOT_OK(child_->GetRepLevels(&child_rep_levels, &child_length));
     int16_t child_max_repetition = child_->max_rep_level();
 
-    size_t idx = 0;
-    while (idx < child_length) {
+    size_t i = 0;
+    while (i < child_length) {
       int16_t level = list_rep_level_;
       do {
-        level = std::min(level, child_rep_levels[idx]);
-        idx++;
-      } while ((idx < child_length) &&
-              (child_rep_levels[idx] >= child_max_repetition));
+        level = std::min(level, child_rep_levels[i]);
+        i++;
+      } while ((i < child_length) &&
+              (child_rep_levels[i] >= child_max_repetition));
       builder.Append(level);
     }
 
@@ -1636,8 +1636,8 @@ Status ListImpl::RepLevelsToOffsetsArray(std::shared_ptr<Buffer>* offsets_array_
 
   uint64_t child_val_idx = 0;
   uint64_t child_level_idx = 0;
-  int16_t min_def_level = (is_spaced_ ? list_def_level_ - 1 : list_def_level_);
-  int16_t max_child_def_level = child_->max_def_level();
+  const int16_t min_def_level = (is_spaced_ ? list_def_level_ - 1 : list_def_level_);
+  const int16_t max_child_def_level = child_->max_def_level();
   RETURN_NOT_OK(offset_builder.Append(0));
   for (size_t i = 0; i < def_levels_length; i++) {
     // Increase the offset only when the list is defined and non-empty
@@ -1653,15 +1653,13 @@ Status ListImpl::RepLevelsToOffsetsArray(std::shared_ptr<Buffer>* offsets_array_
       // Undefined or empty list value
       child_level_idx++;
     }
+
     // Only mark an entry when the value is defined at the list node level or below,
     // or a null is propegated from above
     if (def_levels_data[i] >= min_def_level) {
       RETURN_NOT_OK(offset_builder.Append(child_val_idx));
     }
   }
-
-  // // Add the final offset to the list
-  // RETURN_NOT_OK(offset_builder.Append(child_val_idx));
 
   std::shared_ptr<Array> array;
   *length = offset_builder.length() - 1;
@@ -1678,7 +1676,7 @@ Status ListImpl::NextBatch(int batch_size, std::shared_ptr<Array>* out) {
   std::shared_ptr<Array> child_array;
   int64_t list_length;
 
-  RETURN_NOT_OK(child_->NextBatch(10 * batch_size, &child_array));
+  RETURN_NOT_OK(child_->NextBatch(batch_size, &child_array));
 
   RETURN_NOT_OK(DefLevelsToNullArray(&null_bitmap, &null_count));
   RETURN_NOT_OK(RepLevelsToOffsetsArray(&offsets, &list_length));

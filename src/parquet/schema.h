@@ -148,6 +148,9 @@ class PARQUET_EXPORT Node {
   // parquet::SchemaElement into the public API
   virtual void ToParquet(void* opaque_element) const = 0;
 
+  // Are the values spaced for this node (for required and optional nodes)
+  bool HasSpacedValues() const;
+
   // Node::Visitor abstract class for walking schemas with the visitor pattern
   class Visitor {
    public:

@@ -354,25 +354,6 @@ inline int16_t GetTopNonRepeatedParentLevel(const schema::Node* node,
   return result;
 }
 
-// Finds out wether the node should have its values spaced
-// Optional groups (structs) require spacing in children while
-// repeated groups (lists, maps) forbid it.
-inline bool HasSpacedValues(const schema::Node* node) {
-  const schema::Node* parent;
-
-  while (node) {
-    parent = node->parent();
-    if (node->is_repeated()) {
-      // No need for lower level null due to a list
-      return false;
-    } else if (node->is_optional()) {
-      return true;
-    }
-    node = parent;
-  }
-  return false;
-}
-
 template <typename DType>
 inline int64_t TypedColumnReader<DType>::ReadBatchSpaced(
     int64_t batch_size, int16_t* def_levels, int16_t* rep_levels, T* values,
@@ -406,7 +387,7 @@ inline int64_t TypedColumnReader<DType>::ReadBatchSpaced(
     }
 
     int64_t null_count = 0;
-    if (!HasSpacedValues(node)) {
+    if (!node->HasSpacedValues()) {
       int values_to_read = 0;
       for (int64_t i = 0; i < num_def_levels; ++i) {
         if (def_levels[i] == descr_->max_definition_level()) {

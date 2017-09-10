@@ -1676,8 +1676,10 @@ Status ListImpl::NextBatch(int batch_size, std::shared_ptr<Array>* out) {
   std::shared_ptr<Array> child_array;
   int64_t list_length;
 
+  // Invalidate def and rep levels of the former batch
+  def_levels_buffer_ = nullptr;
+  rep_levels_buffer_ = nullptr;
   RETURN_NOT_OK(child_->NextBatch(batch_size, &child_array));
-
   RETURN_NOT_OK(DefLevelsToNullArray(&null_bitmap, &null_count));
   RETURN_NOT_OK(RepLevelsToOffsetsArray(&offsets, &list_length));
 

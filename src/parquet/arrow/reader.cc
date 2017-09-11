@@ -515,8 +515,18 @@ Status FileReader::Impl::ReadSchemaField(int i, const std::vector<int>& indices,
   std::unique_ptr<ColumnReader> reader(new ColumnReader(std::move(reader_impl)));
 
   int64_t batch_size = 0;
-  for (int j = 0; j < reader_->metadata()->num_row_groups(); j++) {
-    batch_size += reader_->metadata()->RowGroup(j)->ColumnChunk(i)->num_values();
+  // The subtree may contain as number of values as there are leaf
+  // columns associated with it, we will use the longest one
+  for (const int& column_idx: indices) {
+    if (parquet_schema->GetColumnRoot(column_idx) != node) {
+      // column doesn't belong to this tree
+      continue;
+    }
+    int64_t column_batch_size = 0;
+    for (int j = 0; j < reader_->metadata()->num_row_groups(); j++) {
+      column_batch_size += reader_->metadata()->RowGroup(j)->ColumnChunk(column_idx)->num_values();
+    }
+    batch_size = std::max(batch_size, column_batch_size);
   }
 
   return reader->NextBatch(static_cast<int>(batch_size), out);

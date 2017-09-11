@@ -328,6 +328,7 @@ class PARQUET_NO_EXPORT ListImpl : public ColumnReader::Impl {
         is_spaced_(node->HasSpacedValues()),
         pool_(pool) {
     InitField(node, child);
+    min_space_def_level_ = GetTopNonRepeatedParentLevel(node.get(), list_def_level_);
     DCHECK(list_rep_level_ == child_->max_rep_level() - 1);
   }
 
@@ -346,7 +347,8 @@ class PARQUET_NO_EXPORT ListImpl : public ColumnReader::Impl {
   std::shared_ptr<Impl> child_;
   int16_t list_def_level_;
   int16_t list_rep_level_;
-  int16_t is_spaced_;
+  bool is_spaced_;
+  int16_t min_space_def_level_;
   MemoryPool* pool_;
   std::shared_ptr<Field> field_;
   std::shared_ptr<Buffer> def_levels_buffer_;
@@ -1636,13 +1638,11 @@ Status ListImpl::RepLevelsToOffsetsArray(std::shared_ptr<Buffer>* offsets_array_
 
   uint64_t child_val_idx = 0;
   uint64_t child_level_idx = 0;
-  const int16_t min_def_level = (is_spaced_ ? list_def_level_ - 1 : list_def_level_);
-  const int16_t max_child_def_level = child_->max_def_level();
   RETURN_NOT_OK(offset_builder.Append(0));
   for (size_t i = 0; i < def_levels_length; i++) {
     // Increase the offset only when the list is defined and non-empty
     if ((def_levels_data[i] == list_def_level_) &&
-        (child_def_levels[child_level_idx] >= max_child_def_level)) {
+        (child_def_levels[child_level_idx] > list_def_level_)) {
       // Walk over the values belonging to the current list
       do {
         child_level_idx++;
@@ -1656,7 +1656,7 @@ Status ListImpl::RepLevelsToOffsetsArray(std::shared_ptr<Buffer>* offsets_array_
 
     // Only mark an entry when the value is defined at the list node level or below,
     // or a null is propegated from above
-    if (def_levels_data[i] >= min_def_level) {
+    if (def_levels_data[i] >= min_space_def_level_) {
       RETURN_NOT_OK(offset_builder.Append(child_val_idx));
     }
   }

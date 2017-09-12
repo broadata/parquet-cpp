@@ -1523,7 +1523,7 @@ Status ListImpl::DefLevelsToNullArray(std::shared_ptr<Buffer>* null_bitmap_out,
   for (size_t i = 0; i < def_levels_length; i++) {
     if (def_levels_data[i] >= list_def_level_) {
       null_bitmap_builder.Append(true);
-    } else if (is_spaced_ && def_levels_data[i] == list_def_level_ - 1) {
+    } else if (is_spaced_) {
       // Mark null
       null_count += 1;
       null_bitmap_builder.Append(false);

@@ -324,11 +324,9 @@ class PARQUET_NO_EXPORT ListImpl : public ColumnReader::Impl {
       : child_(child),
         list_def_level_(list_def_level),
         list_rep_level_(list_rep_level),
-        is_spaced_(node->HasSpacedValues()),
         pool_(pool) {
     InitField(node, child);
     min_space_def_level_ = GetTopNonRepeatedParentLevel(node.get(), list_def_level_);
-    DCHECK(list_rep_level_ == child_->max_rep_level() - 1);
   }
 
   virtual ~ListImpl() {}
@@ -346,7 +344,7 @@ class PARQUET_NO_EXPORT ListImpl : public ColumnReader::Impl {
   std::shared_ptr<Impl> child_;
   int16_t list_def_level_;
   int16_t list_rep_level_;
-  bool is_spaced_;
+  // The minimal definition level which justifies a null list
   int16_t min_space_def_level_;
   MemoryPool* pool_;
   std::shared_ptr<Field> field_;
@@ -1518,7 +1516,7 @@ Status ListImpl::DefLevelsToNullArray(std::shared_ptr<Buffer>* null_bitmap_out,
   for (size_t i = 0; i < def_levels_length; i++) {
     if (def_levels_data[i] >= list_def_level_) {
       null_bitmap_builder.Append(true);
-    } else if (is_spaced_) {
+    } else if (def_levels_data[i] >= min_space_def_level_) {
       // Mark null
       null_count += 1;
       null_bitmap_builder.Append(false);

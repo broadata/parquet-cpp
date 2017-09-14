@@ -1233,7 +1233,7 @@ Status PrimitiveImpl::TypedReadBatch<::arrow::BooleanType, BooleanType>(
       //    should still free some underlying pages to the OS.
 
       auto data_buffer = std::make_shared<PoolBuffer>(pool_);
-      RETURN_NOT_OK(data_buffer->Resize(valid_bits_idx_ * sizeof(bool)));
+      RETURN_NOT_OK(data_buffer->Resize(::arrow::BitUtil::CeilByte(valid_bits_idx_) / 8));
       memcpy(data_buffer->mutable_data(), data_buffer_->data(), data_buffer->size());
       data_buffer_ = data_buffer;
 

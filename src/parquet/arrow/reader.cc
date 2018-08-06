@@ -39,10 +39,10 @@ using arrow::Column;
 using arrow::Field;
 using arrow::Int32Array;
 using arrow::ListArray;
-using arrow::StructArray;
 using arrow::MemoryPool;
 using arrow::PoolBuffer;
 using arrow::Status;
+using arrow::StructArray;
 using arrow::Table;
 
 using parquet::schema::NodePtr;
@@ -190,12 +190,15 @@ class FileReader::Impl {
   virtual ~Impl() {}
 
   Status GetColumn(int i, std::unique_ptr<ColumnReader>* out);
+  Status GetColumn(int i, std::unique_ptr<ColumnReader>* out, int row_group_index);
   Status ReadSchemaField(int i, std::shared_ptr<Array>* out);
   Status ReadSchemaField(int i, const std::vector<int>& indices,
                          std::shared_ptr<Array>* out);
+  Status ReadSchemaField(int i, const std::vector<int>& indices,
+                         std::shared_ptr<Array>* out, int row_group_index);
   Status GetReaderForNode(const NodePtr& node, const std::vector<int>& indices,
                           int16_t parent_def_level, int16_t parent_rep_level,
-                          std::unique_ptr<ColumnReader::Impl>* out);
+                          std::unique_ptr<ColumnReader::Impl>* out, int row_group_index);
   Status ReadColumn(int i, std::shared_ptr<Array>* out);
   Status GetSchema(std::shared_ptr<::arrow::Schema>* out);
   Status GetSchema(const std::vector<int>& indices,
@@ -404,8 +407,20 @@ FileReader::FileReader(MemoryPool* pool, std::unique_ptr<ParquetFileReader> read
 FileReader::~FileReader() {}
 
 Status FileReader::Impl::GetColumn(int i, std::unique_ptr<ColumnReader>* out) {
-  std::unique_ptr<FileColumnIterator> input(new AllRowGroupsIterator(i, reader_.get()));
+  return GetColumn(i, out, -1);
+}
 
+Status FileReader::Impl::GetColumn(int i, std::unique_ptr<ColumnReader>* out,
+                                   int row_group_index) {
+  FileColumnIterator* iterator = NULL;
+  // NOTE (itaiin): Not the prettiest solution, but this whole file was rewritten
+  //                in future versions
+  if (row_group_index < 0) {
+    iterator = new AllRowGroupsIterator(i, reader_.get());
+  } else {
+    iterator = new SingleRowGroupIterator(i, row_group_index, reader_.get());
+  }
+  std::unique_ptr<FileColumnIterator> input(iterator);
   std::unique_ptr<ColumnReader::Impl> impl(new PrimitiveImpl(pool_, std::move(input)));
   *out = std::unique_ptr<ColumnReader>(new ColumnReader(std::move(impl)));
   return Status::OK();
@@ -415,7 +430,8 @@ Status FileReader::Impl::GetReaderForNode(const NodePtr& node,
                                           const std::vector<int>& indices,
                                           int16_t parent_def_level,
                                           int16_t parent_rep_level,
-                                          std::unique_ptr<ColumnReader::Impl>* out) {
+                                          std::unique_ptr<ColumnReader::Impl>* out,
+                                          int row_group_index) {
   *out = nullptr;
 
   auto def_level = node->is_required() ? parent_def_level : parent_def_level + 1;
@@ -427,7 +443,7 @@ Status FileReader::Impl::GetReaderForNode(const NodePtr& node,
     // Otherwise *out keeps the nullptr value.
     if (std::find(indices.begin(), indices.end(), column_index) != indices.end()) {
       std::unique_ptr<ColumnReader> reader;
-      RETURN_NOT_OK(GetColumn(column_index, &reader));
+      RETURN_NOT_OK(GetColumn(column_index, &reader, row_group_index));
       *out = std::move(reader->impl_);
     }
   } else if (IsStruct(node)) {
@@ -436,7 +452,7 @@ Status FileReader::Impl::GetReaderForNode(const NodePtr& node,
     for (int i = 0; i < group->field_count(); i++) {
       std::unique_ptr<ColumnReader::Impl> child_reader;
       RETURN_NOT_OK(GetReaderForNode(group->field(i), indices, def_level,
-                                     parent_rep_level, &child_reader));
+                                     parent_rep_level, &child_reader, row_group_index));
       if (child_reader != nullptr) {
         children.push_back(std::move(child_reader));
       }
@@ -459,7 +475,8 @@ Status FileReader::Impl::GetReaderForNode(const NodePtr& node,
       // Repeated level always increases max def level
       const int16_t list_def_level = def_level + 1;
       RETURN_NOT_OK(GetReaderForNode(element_node, indices, list_def_level,
-                                     parent_rep_level + 1, &child_reader));
+                                     parent_rep_level + 1, &child_reader,
+                                     row_group_index));
     } else {
       DCHECK((node->logical_type() == LogicalType::MAP) ||
              (node->logical_type() == LogicalType::MAP_KEY_VALUE));
@@ -467,7 +484,8 @@ Status FileReader::Impl::GetReaderForNode(const NodePtr& node,
       DCHECK_EQ(rep_group->field(0)->name(), "key");
       DCHECK_EQ(rep_group->field(1)->name(), "value");
       RETURN_NOT_OK(GetReaderForNode(group->field(0), indices, def_level,
-                                     parent_rep_level + 1, &child_reader));
+                                     parent_rep_level + 1, &child_reader,
+                                     row_group_index));
     }
 
     if (child_reader != nullptr) {
@@ -493,12 +511,18 @@ Status FileReader::Impl::ReadSchemaField(int i, std::shared_ptr<Array>* out) {
 
 Status FileReader::Impl::ReadSchemaField(int i, const std::vector<int>& indices,
                                          std::shared_ptr<Array>* out) {
+  return ReadSchemaField(i, indices, out, -1);
+}
+
+Status FileReader::Impl::ReadSchemaField(int i, const std::vector<int>& indices,
+                                         std::shared_ptr<Array>* out,
+                                         int row_group_index) {
   auto parquet_schema = reader_->metadata()->schema();
 
   auto node = parquet_schema->group_node()->field(i);
   std::unique_ptr<ColumnReader::Impl> reader_impl;
 
-  RETURN_NOT_OK(GetReaderForNode(node, indices, 0, 0, &reader_impl));
+  RETURN_NOT_OK(GetReaderForNode(node, indices, 0, 0, &reader_impl, row_group_index));
   if (reader_impl == nullptr) {
     *out = nullptr;
     return Status::OK();
@@ -507,19 +531,28 @@ Status FileReader::Impl::ReadSchemaField(int i, const std::vector<int>& indices,
   std::unique_ptr<ColumnReader> reader(new ColumnReader(std::move(reader_impl)));
 
   int64_t batch_size = 0;
-  // The subtree may contain as number of values as there are leaf
-  // columns associated with it, we will use the longest one
-  for (const int& column_idx : indices) {
-    if (parquet_schema->GetColumnRoot(column_idx) != node) {
-      // column doesn't belong to this tree
-      continue;
+  if (row_group_index < 0) {
+    // The subtree may contain as number of values as there are leaf
+    // columns associated with it, we will use the longest one
+    for (const int& column_idx : indices) {
+      if (parquet_schema->GetColumnRoot(column_idx) != node) {
+        // column doesn't belong to this tree
+        continue;
+      }
+      int64_t column_batch_size = 0;
+      for (int j = 0; j < reader_->metadata()->num_row_groups(); j++) {
+        column_batch_size +=
+            reader_->metadata()->RowGroup(j)->ColumnChunk(column_idx)->num_values();
+      }
+      batch_size = std::max(batch_size, column_batch_size);
     }
-    int64_t column_batch_size = 0;
-    for (int j = 0; j < reader_->metadata()->num_row_groups(); j++) {
-      column_batch_size +=
-          reader_->metadata()->RowGroup(j)->ColumnChunk(column_idx)->num_values();
+  } else {
+    for (const int& column_idx : indices) {
+      batch_size = std::max(batch_size, reader_->metadata()
+                                            ->RowGroup(row_group_index)
+                                            ->ColumnChunk(column_idx)
+                                            ->num_values());
     }
-    batch_size = std::max(batch_size, column_batch_size);
   }
 
   return reader->NextBatch(static_cast<int>(batch_size), out);
@@ -552,35 +585,29 @@ Status FileReader::Impl::ReadRowGroup(int row_group_index,
 
   auto rg_metadata = reader_->metadata()->RowGroup(row_group_index);
 
-  int num_columns = static_cast<int>(indices.size());
-  int nthreads = std::min<int>(num_threads_, num_columns);
-  std::vector<std::shared_ptr<Column>> columns(num_columns);
+  std::vector<int> field_indices;
+  if (!ColumnIndicesToFieldIndices(*reader_->metadata()->schema(), indices,
+                                   &field_indices)) {
+    return Status::Invalid("Invalid column index");
+  }
 
-  // TODO(wesm): Refactor to share more code with ReadTable
-
-  auto ReadColumnFunc = [&indices, &row_group_index, &schema, &columns, &rg_metadata,
+  std::vector<std::shared_ptr<Column>> columns(field_indices.size());
+  auto ReadColumnFunc = [&indices, &row_group_index, &field_indices, &schema, &columns,
                          this](int i) {
-    int column_index = indices[i];
-    int64_t batch_size = rg_metadata->ColumnChunk(column_index)->num_values();
-
-    std::unique_ptr<FileColumnIterator> input(
-        new SingleRowGroupIterator(column_index, row_group_index, reader_.get()));
-
-    std::unique_ptr<ColumnReader::Impl> impl(new PrimitiveImpl(pool_, std::move(input)));
-    ColumnReader flat_column_reader(std::move(impl));
-
     std::shared_ptr<Array> array;
-    RETURN_NOT_OK(flat_column_reader.NextBatch(static_cast<int>(batch_size), &array));
+    RETURN_NOT_OK(ReadSchemaField(field_indices[i], indices, &array, row_group_index));
     columns[i] = std::make_shared<Column>(schema->field(i), array);
     return Status::OK();
   };
 
+  int num_fields = static_cast<int>(field_indices.size());
+  int nthreads = std::min<int>(num_threads_, num_fields);
   if (nthreads == 1) {
-    for (int i = 0; i < num_columns; i++) {
+    for (int i = 0; i < num_fields; i++) {
       RETURN_NOT_OK(ReadColumnFunc(i));
     }
   } else {
-    RETURN_NOT_OK(ParallelFor(nthreads, num_columns, ReadColumnFunc));
+    RETURN_NOT_OK(ParallelFor(nthreads, num_fields, ReadColumnFunc));
   }
 
   *out = std::make_shared<Table>(schema, columns);

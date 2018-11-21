@@ -1695,6 +1695,12 @@ Status ListImpl::NextBatch(int batch_size, std::shared_ptr<Array>* out) {
   def_levels_buffer_ = nullptr;
   rep_levels_buffer_ = nullptr;
   RETURN_NOT_OK(child_->NextBatch(batch_size, &child_array));
+  if (child_array == nullptr) {
+    // child is null if row groups have been exhausted so we need to return null too
+    // NOTE (itaiin): there's probably a nicer solution here
+    *out = nullptr;
+    return Status::OK();
+  }
   RETURN_NOT_OK(DefLevelsToNullArray(&null_bitmap, &null_count));
   RETURN_NOT_OK(RepLevelsToOffsetsArray(&offsets, &list_length));
 
@@ -1842,6 +1848,13 @@ Status StructImpl::NextBatch(int batch_size, std::shared_ptr<Array>* out) {
     std::shared_ptr<Array> child_array;
 
     RETURN_NOT_OK(child->NextBatch(batch_size, &child_array));
+
+    if (child_array == nullptr) {
+      // child is null if row groups have been exhausted so we need to return null too
+      // NOTE (itaiin): there's probably a nicer solution here
+      *out = nullptr;
+      return Status::OK();
+    }
 
     children_arrays.push_back(child_array);
   }
